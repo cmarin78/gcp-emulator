@@ -1,0 +1,11 @@
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+/data/*.db
+.env
+.idea/
+.vscode/
+*.log
+node_modules/

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>GCP Emulator Console</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">☁️ GCP Emulator <span class="badge">local</span></div>
+    <div class="project">
+      Proyecto:
+      <input id="projectInput" value="demo-project" />
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="sidebar">
+      <button class="nav-item active" data-view="storage">Cloud Storage</button>
+      <button class="nav-item" data-view="compute">Compute Engine</button>
+      <button class="nav-item" data-view="iam">IAM</button>
+    </nav>
+
+    <main class="content">
+
+      <section id="view-storage" class="view active">
+        <h1>Cloud Storage — Buckets</h1>
+        <div class="toolbar">
+          <input id="newBucketName" placeholder="nombre del bucket" />
+          <button onclick="createBucket()">Crear bucket</button>
+          <button onclick="loadBuckets()">Refrescar</button>
+        </div>
+        <table>
+          <thead><tr><th>Nombre</th><th>Ubicación</th><th>Clase</th><th>Creado</th><th></th></tr></thead>
+          <tbody id="bucketsTable"></tbody>
+        </table>
+      </section>
+
+      <section id="view-compute" class="view">
+        <h1>Compute Engine — Instancias</h1>
+        <div class="toolbar">
+          <input id="newInstanceName" placeholder="nombre de instancia" />
+          <select id="newInstanceZone">
+            <option>us-central1-a</option>
+            <option>us-east1-b</option>
+            <option>southamerica-east1-a</option>
+          </select>
+          <button onclick="createInstance()">Crear instancia</button>
+          <button onclick="loadInstances()">Refrescar</button>
+        </div>
+        <table>
+          <thead><tr><th>Nombre</th><th>Zona</th><th>Tipo</th><th>Estado</th><th></th></tr></thead>
+          <tbody id="instancesTable"></tbody>
+        </table>
+      </section>
+
+      <section id="view-iam" class="view">
+        <h1>IAM — Service Accounts</h1>
+        <div class="toolbar">
+          <input id="newSaId" placeholder="account-id" />
+          <button onclick="createServiceAccount()">Crear service account</button>
+          <button onclick="loadServiceAccounts()">Refrescar</button>
+        </div>
+        <table>
+          <thead><tr><th>Email</th><th>Display Name</th><th></th></tr></thead>
+          <tbody id="saTable"></tbody>
+        </table>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
