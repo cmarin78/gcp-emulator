@@ -31,16 +31,16 @@ type Bucket struct {
 }
 
 type Object struct {
-	Name           string `json:"name"`
-	Bucket         string `json:"bucket"`
-	ID             string `json:"id"`
-	ContentType    string `json:"contentType,omitempty"`
-	Size           string `json:"size"`
-	TimeCreated    string `json:"timeCreated"`
-	Updated        string `json:"updated"`
-	SelfLink       string `json:"selfLink"`
-	MediaLink      string `json:"mediaLink"`
-	ContentB64     string `json:"-"` // contenido real, no se serializa en metadata responses
+	Name        string `json:"name"`
+	Bucket      string `json:"bucket"`
+	ID          string `json:"id"`
+	ContentType string `json:"contentType,omitempty"`
+	Size        string `json:"size"`
+	TimeCreated string `json:"timeCreated"`
+	Updated     string `json:"updated"`
+	SelfLink    string `json:"selfLink"`
+	MediaLink   string `json:"mediaLink"`
+	ContentB64  string `json:"-"` // contenido real, no se serializa en metadata responses
 }
 
 type Service struct {

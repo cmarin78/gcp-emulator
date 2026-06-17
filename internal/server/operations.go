@@ -30,25 +30,37 @@ type Operation struct {
 // el emulador las completa inmediatamente; igual queda el historial para
 // que un cliente pueda hacer GET /operations/{name}.
 type Operations struct {
-	mu   sync.Mutex
-	seq  int64
-	ops  map[string]*Operation
+	mu  sync.Mutex
+	seq int64
+	ops map[string]*Operation
 }
 
 func NewOperations() *Operations {
 	return &Operations{ops: make(map[string]*Operation)}
 }
 
-// Done crea y registra una operación ya completada (DONE), tal como
-// corresponde a un emulador que ejecuta todo síncronamente.
+// Done crea y registra una operación ya completada (DONE) de alcance
+// global (sin zone ni region), tal como corresponde a un emulador que
+// ejecuta todo síncronamente.
 func (o *Operations) Done(opType, targetLink, selfLinkBase string) *Operation {
-	return o.DoneZonal(opType, targetLink, selfLinkBase, "")
+	return o.done(opType, targetLink, selfLinkBase, "", "")
 }
 
 // DoneZonal es igual a Done pero además fija el campo "zone" (path completo,
 // p. ej. "projects/demo-project/zones/us-central1-a"), requerido por
 // gcloud compute al hacer polling de operaciones zonales.
 func (o *Operations) DoneZonal(opType, targetLink, selfLinkBase, zone string) *Operation {
+	return o.done(opType, targetLink, selfLinkBase, zone, "")
+}
+
+// DoneRegional es igual a Done pero fija "region" (path completo, p. ej.
+// "projects/demo-project/regions/us-central1"), requerido para recursos
+// regionales como subnetworks.
+func (o *Operations) DoneRegional(opType, targetLink, selfLinkBase, region string) *Operation {
+	return o.done(opType, targetLink, selfLinkBase, "", region)
+}
+
+func (o *Operations) done(opType, targetLink, selfLinkBase, zone, region string) *Operation {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.seq++
@@ -66,6 +78,7 @@ func (o *Operations) DoneZonal(opType, targetLink, selfLinkBase, zone string) *O
 		EndTime:       now,
 		SelfLink:      selfLinkBase + "/" + name,
 		Zone:          zone,
+		Region:        region,
 	}
 	o.ops[name] = op
 	return op
