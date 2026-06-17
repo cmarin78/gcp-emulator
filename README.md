@@ -20,9 +20,14 @@ overriding their API endpoints to `localhost`.
 Implemented (functional subset, not exhaustive):
 
 - **IAM**: create/list/get/delete service accounts, get/set project-level
-  IAM policy, list of basic predefined roles.
+  IAM policy, list of basic predefined roles, custom roles (create/get/
+  list/patch/delete with soft-delete + `:undelete`), service account keys
+  (create/list/get/delete, with `privateKeyData` returned only on create),
+  and resource-level IAM bindings for service accounts
+  (`:getIamPolicy`/`:setIamPolicy`).
 - **Cloud Storage (GCS)**: create/list/get/delete buckets; upload
-  (`uploadType=media`), list, download (`alt=media`), and delete objects.
+  (`uploadType=media`), list, download (`alt=media`), and delete objects;
+  bucket-level IAM bindings (`GET`/`PUT /b/{bucket}/iam`).
 - **Compute Engine**:
   - Instances: create/list/get/delete, start/stop, with real
     `disks[]` and `networkInterfaces[]` (boot disks are created
@@ -53,8 +58,7 @@ Implemented (functional subset, not exhaustive):
   network interface) — applies and destroys cleanly, no provider patches
   needed.
 
-Roadmap / what's next: advanced IAM (custom roles, SA keys,
-resource-level bindings), Cloud Run, Cloud Functions, Cloud SQL,
+Roadmap / what's next: Cloud Run, Cloud Functions, Cloud SQL,
 Firestore, BigQuery, and observability stubs (KMS, Logging, Monitoring).
 See [ROADMAP.md](ROADMAP.md) for the full phased plan. The architecture
 (`internal/services/<service>`) is designed so new services can be added

@@ -19,6 +19,7 @@ import (
 
 const bucketBuckets = "gcs.buckets"
 const bucketObjects = "gcs.objects"
+const bucketIAMPolicies = "gcs.bucket_iam"
 
 type Bucket struct {
 	Name         string `json:"name"`
@@ -28,6 +29,21 @@ type Bucket struct {
 	StorageClass string `json:"storageClass,omitempty"`
 	TimeCreated  string `json:"timeCreated"`
 	SelfLink     string `json:"selfLink"`
+}
+
+// IAMPolicy replica el shape de la política IAM de un bucket
+// (GET/PUT /storage/v1/b/{bucket}/iam). Es un tipo propio, independiente
+// del paquete iam, siguiendo la convención de servicios autocontenidos.
+type IAMPolicy struct {
+	Kind     string       `json:"kind"`
+	Bindings []IAMBinding `json:"bindings"`
+	Etag     string       `json:"etag"`
+	Version  int          `json:"version,omitempty"`
+}
+
+type IAMBinding struct {
+	Role    string   `json:"role"`
+	Members []string `json:"members"`
 }
 
 type Object struct {
@@ -64,6 +80,11 @@ func (s *Service) Register(mux *http.ServeMux) {
 	// Endpoint de "simple upload" (uploadType=media), como en
 	// https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o
 	mux.HandleFunc("POST /upload/storage/v1/b/{bucket}/o", s.uploadObject)
+
+	// IAM binding a nivel de bucket (resource-level IAM), igual que la
+	// API real: GET/PUT /storage/v1/b/{bucket}/iam.
+	mux.HandleFunc("GET /storage/v1/b/{bucket}/iam", s.getBucketIamPolicy)
+	mux.HandleFunc("PUT /storage/v1/b/{bucket}/iam", s.setBucketIamPolicy)
 }
 
 func (s *Service) createBucket(w http.ResponseWriter, r *http.Request) {
@@ -237,6 +258,36 @@ func (s *Service) deleteObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) getBucketIamPolicy(w http.ResponseWriter, r *http.Request) {
+	bucket := r.PathValue("bucket")
+	var policy IAMPolicy
+	found, err := s.db.Get(bucketIAMPolicies, bucket, &policy)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		policy = IAMPolicy{Kind: "storage#policy", Bindings: []IAMBinding{}, Etag: "initial", Version: 1}
+	}
+	server.WriteJSON(w, 200, policy)
+}
+
+func (s *Service) setBucketIamPolicy(w http.ResponseWriter, r *http.Request) {
+	bucket := r.PathValue("bucket")
+	var policy IAMPolicy
+	if err := json.NewDecoder(r.Body).Decode(&policy); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	policy.Kind = "storage#policy"
+	policy.Etag = fmt.Sprintf("etag-%d", time.Now().UnixNano())
+	if err := s.db.Put(bucketIAMPolicies, bucket, policy); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	server.WriteJSON(w, 200, policy)
 }
 
 func orDefault(v, def string) string {

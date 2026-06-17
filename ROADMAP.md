@@ -9,8 +9,11 @@ own `Register(mux)`, following the pattern already used by IAM/GCS/Compute.
 
 ## Current status
 
-- IAM: service accounts, project-level IAM policy, predefined roles (static list).
-- Storage: buckets, objects (simple upload, download, listing, delete).
+- IAM: service accounts, project-level IAM policy, predefined roles (static list),
+  custom roles (with soft-delete + undelete), service account keys,
+  resource-level IAM bindings (service accounts).
+- Storage: buckets, objects (simple upload, download, listing, delete),
+  bucket-level IAM bindings.
 - Compute: static zones/machine types, instances (basic CRUD, start/stop), operations.
 - Pub/Sub: topics, subscriptions, publish/pull/acknowledge.
 - Secret Manager: secrets, versions, addVersion/access/destroy.
@@ -36,14 +39,14 @@ This phase closes that gap.
 `google_compute_network` works without patches (just like
 `google_storage_bucket` and `google_service_account` already did).
 
-## Phase 2 — Advanced IAM
+## Phase 2 — Advanced IAM ✅ completed
 
-| Resource | Depends on | Why | Effort |
-|---|---|---|---|
-| `iam.roles` (custom roles) | — | `google_project_iam_custom_role` | S |
-| `iam.serviceAccountKeys` | service accounts (already exists) | `google_service_account_key` | S |
-| Resource-level IAM bindings (bucket, service account) | storage/iam (already exist) | `google_storage_bucket_iam_*`, `google_service_account_iam_*` | M |
-| `resourcemanager.projects` (create/get) | — | Optional: today "project" is an opaque string and that already works fine; this is just for added realism | S (low priority) |
+| Resource | Depends on | Why | Effort | Status |
+|---|---|---|---|---|
+| `iam.roles` (custom roles) | — | `google_project_iam_custom_role` | S | ✅ |
+| `iam.serviceAccountKeys` | service accounts (already exists) | `google_service_account_key` | S | ✅ |
+| Resource-level IAM bindings (bucket, service account) | storage/iam (already exist) | `google_storage_bucket_iam_*`, `google_service_account_iam_*` | M | ✅ |
+| `resourcemanager.projects` (create/get) | — | Optional: today "project" is an opaque string and that already works fine; this is just for added realism | S (low priority) | — |
 
 ## Phase 3 — High-value standalone services ✅ completed
 
