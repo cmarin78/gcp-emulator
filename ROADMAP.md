@@ -23,6 +23,10 @@ own `Register(mux)`, following the pattern already used by IAM/GCS/Compute.
 - Cloud SQL: instances, databases, users, sqladmin#operation + operations.get.
 - Firestore: databases (admin), simple document CRUD (fields as passthrough JSON).
 - BigQuery: datasets, tables (synchronous, no Operation).
+- Cloud KMS: keyrings, cryptokeys, cryptoKeyVersions (`:destroy` action); no delete on
+  keyrings/cryptokeys, matching the real API.
+- Cloud Logging: project-level sinks (stub, no real log pipeline).
+- Cloud Monitoring: alert policies + empty `timeSeries` stub.
 
 ## Phase 1 — Complete Compute for real IaC
 
@@ -98,13 +102,22 @@ directly. Verified with `terraform apply`/`destroy` against
 `big_query_custom_endpoint` (note: the provider itself requires
 `deletion_protection = false` on the table to allow `terraform destroy`).
 
-## Phase 6 — Observability and governance (low priority)
+## Phase 6 — Observability and governance ✅ completed
 
-| Service | Note | Effort |
-|---|---|---|
-| Cloud KMS | keyrings, cryptokeys — useful if Secret Manager later emulates real encryption | S |
-| Cloud Logging | sink stub, no real log pipeline | S |
-| Cloud Monitoring | metrics stub | S |
+| Service | Note | Effort | Status |
+|---|---|---|---|
+| Cloud KMS | keyrings, cryptokeys, no delete (real API behavior); cryptoKeyVersions `:destroy` | S | ✅ |
+| Cloud Logging | sink stub, no real log pipeline | S | ✅ |
+| Cloud Monitoring | alertPolicies + empty `timeSeries` stub | S | ✅ |
+
+Cloud KMS faithfully omits delete for keyrings/cryptokeys (the real API has none);
+Terraform's `google_kms_crypto_key` destroy instead calls `cryptoKeyVersions:destroy`
+on each version, which is what's modeled here. Verified with `terraform apply`/`destroy`
+against `google_kms_key_ring` + `google_kms_crypto_key` using `kms_custom_endpoint`.
+Note: the `hashicorp/google` provider's KMS path templates already include a `v1/`
+prefix for some calls (e.g. `cryptoKeyVersions` listing) while requiring the endpoint
+to supply `v1/` for others (key ring/crypto key create) — the emulator normalizes the
+resulting occasional `/v1/v1/...` request path centrally in `server.Handler()`.
 
 ## Recommended order
 
@@ -113,4 +126,4 @@ directly. Verified with `terraform apply`/`destroy` against
 3. Phase 2 (Advanced IAM) — reinforces what already exists.
 4. Phase 4 (Cloud Run / Functions) — more effort, larger API surface. ✅ done.
 5. Phase 5 (data) — the most expensive to implement, best left until the service pattern is well polished. ✅ done.
-6. Phase 6 — whenever a concrete use case needs it. ← next.
+6. Phase 6 (observability/governance) — ✅ done.

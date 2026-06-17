@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -30,7 +31,23 @@ func (s *Server) Mux() *http.ServeMux {
 // Handler devuelve el http.Handler final, con logging y CORS para que el
 // frontend (consola web) pueda llamar al emulador desde otro puerto/origen.
 func (s *Server) Handler() http.Handler {
-	return withCORS(withLogging(s.mux))
+	return withCORS(withLogging(withPathNormalize(s.mux)))
+}
+
+// withPathNormalize corrige una particularidad del provider hashicorp/google:
+// para algunos custom endpoints (p. ej. kms_custom_endpoint) el provider
+// espera que el endpoint NO incluya el prefijo de versión (lo añade él
+// mismo), pero para otras rutas del mismo servicio sí lo añade el usuario al
+// configurar el endpoint, dando lugar a un "/v1/v1/..." duplicado en algunas
+// peticiones. Aquí se normaliza ese caso colapsando el prefijo duplicado,
+// sin afectar al resto de rutas.
+func withPathNormalize(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/v1/") {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/v1")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func withLogging(next http.Handler) http.Handler {

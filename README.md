@@ -73,18 +73,30 @@ Implemented (functional subset, not exhaustive):
   (`/bigquery/v2/projects/{p}/datasets[/{dataset}[/tables[/{table}]]]`).
   Unlike the other v2-era services, BigQuery's real API is synchronous, so
   mutations return the resource directly (no `Operation`).
+- **Cloud KMS**: keyrings and cryptokeys
+  (`/v1/projects/{p}/locations/{l}/keyRings[/{keyRing}/cryptoKeys[/{cryptoKey}]]`),
+  faithfully without a delete endpoint for either (the real API has none);
+  cryptoKeyVersions support `:destroy` (state → `DESTROY_SCHEDULED`), which
+  is what Terraform actually calls to "destroy" a crypto key.
+- **Cloud Logging**: project-level sinks
+  (`/v2/projects/{p}/sinks[/{sink}]`, CRUD). Stub only — no real log
+  pipeline (no log entries written/queried).
+- **Cloud Monitoring**: alert policies
+  (`/v3/projects/{p}/alertPolicies[/{policy}]`, CRUD) and a `timeSeries`
+  endpoint that always returns an empty list.
 - **Web console** (`web/console`): minimal UI to view and manage buckets,
   instances, and service accounts.
 - Verified end-to-end with a real `terraform apply`/`destroy` against
   `google_compute_network` + `google_compute_instance` (boot disk +
-  network interface), against `google_cloud_run_v2_service`, and against
-  `google_bigquery_dataset` + `google_bigquery_table` — all apply and
-  destroy cleanly, no provider patches needed.
+  network interface), against `google_cloud_run_v2_service`, against
+  `google_bigquery_dataset` + `google_bigquery_table`, and against
+  `google_kms_key_ring` + `google_kms_crypto_key` — all apply and destroy
+  cleanly, no provider patches needed.
 
-Roadmap / what's next: observability stubs (KMS, Logging, Monitoring).
-See [ROADMAP.md](ROADMAP.md) for the full phased plan. The architecture
-(`internal/services/<service>`) is designed so new services can be added
-without touching existing ones.
+Roadmap / what's next: see [ROADMAP.md](ROADMAP.md) for the full phased
+plan (all six planned phases are now complete; future work would be new,
+unplanned phases). The architecture (`internal/services/<service>`) is
+designed so new services can be added without touching existing ones.
 
 ## Project structure
 
@@ -104,6 +116,9 @@ internal/services/cloudfunctions/   Cloud Functions emulation (Gen2 functions)
 internal/services/cloudsql/         Cloud SQL Admin emulation (instances, databases, users)
 internal/services/firestore/        Firestore emulation (databases, simple document CRUD)
 internal/services/bigquery/         BigQuery emulation (datasets, tables)
+internal/services/kms/              Cloud KMS emulation (keyrings, cryptokeys, cryptoKeyVersions)
+internal/services/logging/          Cloud Logging emulation (project-level sinks)
+internal/services/monitoring/       Cloud Monitoring emulation (alert policies, timeSeries stub)
 web/console/                static frontend (HTML/CSS/JS, no build step)
 scripts/                    scripts to point the gcloud CLI at the emulator
 data/                       runtime embedded data file (gitignored)
@@ -298,6 +313,32 @@ resource "google_bigquery_table" "default" {
 (`deletion_protection = false` is required by the provider itself to allow
 `terraform destroy` on a table — it's a client-side guard, not something
 the emulator enforces.)
+
+Cloud KMS uses `kms_custom_endpoint`:
+
+```hcl
+provider "google" {
+  project             = "demo-project"
+  region              = "us-central1"
+  access_token        = "dummy-token"
+  kms_custom_endpoint = "http://localhost:8443/v1/"
+}
+
+resource "google_kms_key_ring" "default" {
+  name     = "tf-keyring"
+  location = "us-central1"
+}
+
+resource "google_kms_crypto_key" "default" {
+  name     = "tf-key"
+  key_ring = google_kms_key_ring.default.id
+  purpose  = "ENCRYPT_DECRYPT"
+}
+```
+
+`terraform destroy` on the crypto key calls `cryptoKeyVersions:destroy`
+under the hood (the key ring/crypto key resources themselves are never
+deleted, matching real GCP behavior).
 
 ## Trying it without gcloud (curl)
 
