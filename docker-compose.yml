@@ -1,0 +1,13 @@
+services:
+  gcp-emulator:
+    build: .
+    image: gcp-emulator:local
+    container_name: gcp-emulator
+    ports:
+      - "9443:8443"
+    volumes:
+      - emulator-data:/data
+    restart: unless-stopped
+
+volumes:
+  emulator-data:

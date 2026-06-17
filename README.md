@@ -78,6 +78,21 @@ go build -o bin/gcp-emulator ./cmd/server
 
 Abrí `http://localhost:8443` para la consola web.
 
+## Levantar con Docker (recomendado: portable y sin instalar Go)
+
+```bash
+docker compose up --build -d
+# o, sin compose:
+docker build -t gcp-emulator .
+docker run --rm -p 8443:8443 -v emulator-data:/data gcp-emulator
+```
+
+La imagen es multi-stage (build con `golang:1.22-alpine`, runtime en
+`alpine` sin toolchain) y corre como usuario no-root. Los datos persisten
+en el volumen `emulator-data` (`/data/emulator.db` dentro del contenedor),
+así que sobreviven a `docker compose down` / recreaciones del contenedor
+(no a `docker compose down -v`, que borra también el volumen).
+
 ## Usar gcloud CLI contra el emulador
 
 ```bash

@@ -1,0 +1,14 @@
+.git/
+.gitignore
+bin/
+dist/
+data/
+*.exe
+*.test
+*.out
+*.log
+.idea/
+.vscode/
+node_modules/
+README.md
+scripts/
