@@ -89,15 +89,24 @@ Abrí `http://localhost:8443` para la consola web.
 ```
 
 Esto configura `api_endpoint_overrides` para storage/compute/iam apuntando
-al emulador. Luego, por ejemplo:
+al emulador (storage e iam usan distinta forma de URL porque sus clientes
+arman el path de manera distinta: storage y compute necesitan el `v1/` en
+el override, iam lo agrega solo). gcloud además exige una cuenta "activa";
+si ya tenés una sesión logueada en tu configuración `default`, alcanza con
+reusarla (el script lo hace automáticamente) — el emulador no valida el
+token. Luego, por ejemplo:
 
 ```bash
 gcloud storage buckets create gs://mi-bucket --project=demo-project
 gcloud storage buckets list
 gcloud compute instances create mi-vm --zone=us-central1-a --project=demo-project
-gcloud compute instances list --zone=us-central1-a
+gcloud compute instances list --zones=us-central1-a --project=demo-project
+gcloud iam service-accounts create demo-sa --display-name="Demo SA" --project=demo-project
+gcloud iam service-accounts list --project=demo-project
 ```
 
+Tip: usá una `gcloud configuration` separada (`gcloud config configurations
+create emulator-test`) para no pisar tu configuración real mientras probás.
 Para volver a la GCP real, creá/activá otra `gcloud configuration`:
 
 ```bash
