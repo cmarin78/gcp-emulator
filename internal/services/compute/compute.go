@@ -115,7 +115,7 @@ func (s *Service) insertInstance(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	op := s.ops.Done("insert", inst.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone))
+	op := s.ops.DoneZonal("insert", inst.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -157,8 +157,8 @@ func (s *Service) deleteInstance(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	op := s.ops.Done("delete", fmt.Sprintf("/compute/v1/projects/%s/zones/%s/instances/%s", project, zone, name),
-		fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone))
+	op := s.ops.DoneZonal("delete", fmt.Sprintf("/compute/v1/projects/%s/zones/%s/instances/%s", project, zone, name),
+		fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -181,7 +181,7 @@ func (s *Service) setStatus(w http.ResponseWriter, r *http.Request, status strin
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	op := s.ops.Done("update", inst.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone))
+	op := s.ops.DoneZonal("update", inst.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -203,4 +203,8 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
+}
+
+func zonePath(project, zone string) string {
+	return fmt.Sprintf("projects/%s/zones/%s", project, zone)
 }

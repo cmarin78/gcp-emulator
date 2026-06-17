@@ -57,8 +57,10 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /v1/projects/{project}/serviceAccounts/{account}", s.deleteServiceAccount)
 
 	// IAM policy a nivel de proyecto (compatible con resourcemanager v1/v3).
-	mux.HandleFunc("POST /v1/projects/{project}:getIamPolicy", s.getProjectPolicy)
-	mux.HandleFunc("POST /v1/projects/{project}:setIamPolicy", s.setProjectPolicy)
+	// Go's net/http mux no permite mezclar texto literal con un wildcard
+	// dentro del mismo segmento (p. ej. "{project}:getIamPolicy"), así que
+	// capturamos el segmento completo y separamos la acción nosotros mismos.
+	mux.HandleFunc("POST /v1/projects/{projectAction}", s.projectPolicyAction)
 
 	// Roles predefinidos básicos, sólo lectura (lista estática).
 	mux.HandleFunc("GET /v1/roles", s.listPredefinedRoles)
@@ -146,8 +148,26 @@ func emailFromPathValue(account, project string) string {
 	return fmt.Sprintf("%s@%s.iam.gserviceaccount.com", account, project)
 }
 
-func (s *Service) getProjectPolicy(w http.ResponseWriter, r *http.Request) {
-	project := r.PathValue("project")
+// projectPolicyAction despacha POST /v1/projects/{project}:getIamPolicy y
+// :setIamPolicy, ya que ambos comparten el mismo segmento de ruta.
+func (s *Service) projectPolicyAction(w http.ResponseWriter, r *http.Request) {
+	projectAction := r.PathValue("projectAction")
+	project, action, ok := strings.Cut(projectAction, ":")
+	if !ok {
+		server.WriteError(w, 404, "NOT_FOUND", "ruta no encontrada")
+		return
+	}
+	switch action {
+	case "getIamPolicy":
+		s.getProjectPolicy(w, r, project)
+	case "setIamPolicy":
+		s.setProjectPolicy(w, r, project)
+	default:
+		server.WriteError(w, 404, "NOT_FOUND", "acción no soportada: "+action)
+	}
+}
+
+func (s *Service) getProjectPolicy(w http.ResponseWriter, r *http.Request, project string) {
 	var policy Policy
 	found, err := s.db.Get(bucketPolicies, project, &policy)
 	if err != nil {
@@ -160,8 +180,7 @@ func (s *Service) getProjectPolicy(w http.ResponseWriter, r *http.Request) {
 	server.WriteJSON(w, 200, policy)
 }
 
-func (s *Service) setProjectPolicy(w http.ResponseWriter, r *http.Request) {
-	project := r.PathValue("project")
+func (s *Service) setProjectPolicy(w http.ResponseWriter, r *http.Request, project string) {
 	var body struct {
 		Policy Policy `json:"policy"`
 	}

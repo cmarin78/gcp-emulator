@@ -12,13 +12,18 @@ import (
 // para que gcloud/SDKs que hacen polling con operations.get funcionen.
 type Operation struct {
 	Name          string `json:"name"`
+	ID            string `json:"id,omitempty"`
 	Status        string `json:"status"` // PENDING | RUNNING | DONE
 	OperationType string `json:"operationType,omitempty"`
 	TargetLink    string `json:"targetLink,omitempty"`
 	Progress      int    `json:"progress"`
 	InsertTime    string `json:"insertTime"`
+	StartTime     string `json:"startTime,omitempty"`
 	EndTime       string `json:"endTime,omitempty"`
 	SelfLink      string `json:"selfLink,omitempty"`
+	Zone          string `json:"zone,omitempty"`
+	Region        string `json:"region,omitempty"`
+	User          string `json:"user,omitempty"`
 }
 
 // Operations es un registro en memoria de operaciones, suficiente porque
@@ -37,6 +42,13 @@ func NewOperations() *Operations {
 // Done crea y registra una operación ya completada (DONE), tal como
 // corresponde a un emulador que ejecuta todo síncronamente.
 func (o *Operations) Done(opType, targetLink, selfLinkBase string) *Operation {
+	return o.DoneZonal(opType, targetLink, selfLinkBase, "")
+}
+
+// DoneZonal es igual a Done pero además fija el campo "zone" (path completo,
+// p. ej. "projects/demo-project/zones/us-central1-a"), requerido por
+// gcloud compute al hacer polling de operaciones zonales.
+func (o *Operations) DoneZonal(opType, targetLink, selfLinkBase, zone string) *Operation {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.seq++
@@ -44,13 +56,16 @@ func (o *Operations) Done(opType, targetLink, selfLinkBase string) *Operation {
 	now := time.Now().UTC().Format(time.RFC3339)
 	op := &Operation{
 		Name:          name,
+		ID:            fmt.Sprintf("%d", o.seq),
 		Status:        "DONE",
 		OperationType: opType,
 		TargetLink:    targetLink,
 		Progress:      100,
 		InsertTime:    now,
+		StartTime:     now,
 		EndTime:       now,
 		SelfLink:      selfLinkBase + "/" + name,
+		Zone:          zone,
 	}
 	o.ops[name] = op
 	return op
