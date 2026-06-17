@@ -7,6 +7,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -76,4 +77,27 @@ type APIError struct {
 
 func WriteError(w http.ResponseWriter, code int, status, message string) {
 	WriteJSON(w, code, map[string]APIError{"error": {Code: code, Message: message, Status: status}})
+}
+
+// LongRunningOperation replica el shape genérico google.longrunning.Operation
+// usado por las APIs v2 modernas (Cloud Run, Cloud Functions).
+type LongRunningOperation struct {
+	Name string `json:"name"`
+	Done bool   `json:"done"`
+}
+
+// RegisterV2Operations monta el endpoint de operaciones compartido por
+// Cloud Run y Cloud Functions: ambos usan el mismo path real
+// (/v2/projects/{p}/locations/{l}/operations/{operation}), así que se
+// registra una sola vez aquí en lugar de en cada servicio, para evitar
+// un panic de ruta duplicada en el mux. Como ninguno de los dos modela
+// operaciones realmente asíncronas (siempre responden con done=true al
+// crear/actualizar/borrar), este endpoint solo necesita devolver
+// done=true para cualquier nombre de operación, sin estado persistido.
+func RegisterV2Operations(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v2/projects/{project}/locations/{location}/operations/{operation}", func(w http.ResponseWriter, r *http.Request) {
+		name := fmt.Sprintf("projects/%s/locations/%s/operations/%s",
+			r.PathValue("project"), r.PathValue("location"), r.PathValue("operation"))
+		WriteJSON(w, 200, LongRunningOperation{Name: name, Done: true})
+	})
 }

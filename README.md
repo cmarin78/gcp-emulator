@@ -51,15 +51,23 @@ Implemented (functional subset, not exhaustive):
   `projects/{p}/locations/{l}/repositories`, with create/delete returning
   a `google.longrunning.Operation`-shaped response (always resolved,
   `done: true`).
+- **Cloud Run**: v2 services (`/v2/projects/{p}/locations/{l}/services`,
+  create/get/list/update/delete) with synthesized `uri`, fake revision
+  names, and `terminalCondition` always healthy; mutations return a
+  `google.longrunning.Operation`.
+- **Cloud Functions**: Gen2 functions (`/v2/projects/{p}/locations/{l}/functions`,
+  create/get/list/update/delete), modeled as backed by a synthesized Cloud
+  Run service (`serviceConfig.service`/`.uri`), matching how Gen2 actually
+  works on real GCP; mutations also return an `Operation`.
 - **Web console** (`web/console`): minimal UI to view and manage buckets,
   instances, and service accounts.
 - Verified end-to-end with a real `terraform apply`/`destroy` against
   `google_compute_network` + `google_compute_instance` (boot disk +
-  network interface) — applies and destroys cleanly, no provider patches
-  needed.
+  network interface), and separately against `google_cloud_run_v2_service`
+  — both apply and destroy cleanly, no provider patches needed.
 
-Roadmap / what's next: Cloud Run, Cloud Functions, Cloud SQL,
-Firestore, BigQuery, and observability stubs (KMS, Logging, Monitoring).
+Roadmap / what's next: Cloud SQL, Firestore, BigQuery, and observability
+stubs (KMS, Logging, Monitoring).
 See [ROADMAP.md](ROADMAP.md) for the full phased plan. The architecture
 (`internal/services/<service>`) is designed so new services can be added
 without touching existing ones.
@@ -77,6 +85,8 @@ internal/services/compute/  Compute Engine emulation (instances, networks,
 internal/services/pubsub/         Pub/Sub emulation (topics, subscriptions, publish/pull/ack)
 internal/services/secretmanager/  Secret Manager emulation (secrets, versions)
 internal/services/artifactregistry/ Artifact Registry emulation (repositories)
+internal/services/cloudrun/         Cloud Run emulation (v2 services)
+internal/services/cloudfunctions/   Cloud Functions emulation (Gen2 functions)
 web/console/                static frontend (HTML/CSS/JS, no build step)
 scripts/                    scripts to point the gcloud CLI at the emulator
 data/                       runtime embedded data file (gitignored)
@@ -215,6 +225,32 @@ resource "google_compute_instance" "vm" {
 
 `terraform apply` / `terraform destroy` work against this without any
 provider patches.
+
+Cloud Run v2 uses a separate custom-endpoint attribute
+(`cloud_run_v2_custom_endpoint`, not `run_custom_endpoint`):
+
+```hcl
+provider "google" {
+  project                      = "demo-project"
+  region                       = "us-central1"
+  access_token                 = "dummy-token"
+  cloud_run_v2_custom_endpoint = "http://localhost:8443/v2/"
+}
+
+resource "google_cloud_run_v2_service" "default" {
+  name     = "tf-hello"
+  location = "us-central1"
+
+  template {
+    containers {
+      image = "gcr.io/cloudrun/hello"
+      ports {
+        container_port = 8080
+      }
+    }
+  }
+}
+```
 
 ## Trying it without gcloud (curl)
 

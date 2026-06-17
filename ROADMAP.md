@@ -18,6 +18,8 @@ own `Register(mux)`, following the pattern already used by IAM/GCS/Compute.
 - Pub/Sub: topics, subscriptions, publish/pull/acknowledge.
 - Secret Manager: secrets, versions, addVersion/access/destroy.
 - Artifact Registry: repositories, longrunning operations.
+- Cloud Run: v2 services (create/get/list/update/delete), longrunning operations.
+- Cloud Functions: Gen2 functions (create/get/list/update/delete), longrunning operations.
 
 ## Phase 1 — Complete Compute for real IaC
 
@@ -59,12 +61,18 @@ order or in parallel.
 | Secret Manager | secrets, versions | S | ✅ |
 | Artifact Registry | repositories | S | ✅ |
 
-## Phase 4 — Serverless compute
+## Phase 4 — Serverless compute ✅ completed
 
-| Service | Depends on | Note | Effort |
-|---|---|---|---|
-| Cloud Run | — (accepts image references without validating against Artifact Registry) | services + revisions | M |
-| Cloud Functions | — (accepts source metadata without validating against Storage) | Gen2 is implemented on top of Cloud Run in real GCP; best done after Cloud Run | M |
+| Service | Depends on | Note | Effort | Status |
+|---|---|---|---|---|
+| Cloud Run | — (accepts image references without validating against Artifact Registry) | services + revisions | M | ✅ |
+| Cloud Functions | — (accepts source metadata without validating against Storage) | Gen2 is implemented on top of Cloud Run in real GCP; best done after Cloud Run | M | ✅ |
+
+Both share the real `/v2/.../operations/{operation}` path; since the emulator
+multiplexes everything on a single `http.ServeMux`, this is registered once
+centrally (`server.RegisterV2Operations`) instead of per-service. Verified
+with `terraform apply`/`destroy` against `google_cloud_run_v2_service` using
+`cloud_run_v2_custom_endpoint` in the provider block.
 
 ## Phase 5 — Data
 
@@ -90,6 +98,6 @@ current Compute/Storage.
 1. Phase 1 (Complete Compute) — the most visible gap right now (found while testing Terraform).
 2. Phase 3 (Pub/Sub, Secret Manager, Artifact Registry) — high value, zero dependencies, low/medium effort.
 3. Phase 2 (Advanced IAM) — reinforces what already exists.
-4. Phase 4 (Cloud Run / Functions) — more effort, larger API surface.
-5. Phase 5 (data) — the most expensive to implement, best left until the service pattern is well polished.
+4. Phase 4 (Cloud Run / Functions) — more effort, larger API surface. ✅ done.
+5. Phase 5 (data) — the most expensive to implement, best left until the service pattern is well polished. ← next.
 6. Phase 6 — whenever a concrete use case needs it.
