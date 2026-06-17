@@ -35,6 +35,17 @@ Implemented (functional subset, not exhaustive):
   - Static zones/machine types, singular `zones/{zone}` and
     `regions/{region}` lookups, and the `Operation` resource (synchronous)
     for compatibility with the real `gcloud`/Terraform flow.
+- **Pub/Sub**: topics and subscriptions (CRUD), `topics.publish`,
+  `subscriptions.pull`, `subscriptions.acknowledge`. Message delivery is
+  in-memory (not persisted), enough for typical create/publish/consume
+  flows.
+- **Secret Manager**: secrets (CRUD), `secrets.addVersion`,
+  `versions.access` (including the `latest` alias), `versions.destroy`.
+  Payloads are stored base64-encoded, same as the real API.
+- **Artifact Registry**: repositories (CRUD) under
+  `projects/{p}/locations/{l}/repositories`, with create/delete returning
+  a `google.longrunning.Operation`-shaped response (always resolved,
+  `done: true`).
 - **Web console** (`web/console`): minimal UI to view and manage buckets,
   instances, and service accounts.
 - Verified end-to-end with a real `terraform apply`/`destroy` against
@@ -42,12 +53,12 @@ Implemented (functional subset, not exhaustive):
   network interface) — applies and destroys cleanly, no provider patches
   needed.
 
-Roadmap / what's next: Pub/Sub, Secret Manager, Artifact Registry, Cloud
-Run, Cloud Functions, Cloud SQL, Firestore, BigQuery, advanced IAM
-(custom roles, SA keys, resource-level bindings), and observability
-stubs (KMS, Logging, Monitoring). See [ROADMAP.md](ROADMAP.md) for the
-full phased plan. The architecture (`internal/services/<service>`) is
-designed so new services can be added without touching existing ones.
+Roadmap / what's next: advanced IAM (custom roles, SA keys,
+resource-level bindings), Cloud Run, Cloud Functions, Cloud SQL,
+Firestore, BigQuery, and observability stubs (KMS, Logging, Monitoring).
+See [ROADMAP.md](ROADMAP.md) for the full phased plan. The architecture
+(`internal/services/<service>`) is designed so new services can be added
+without touching existing ones.
 
 ## Project structure
 
@@ -59,6 +70,9 @@ internal/services/iam/      IAM emulation
 internal/services/gcs/      Cloud Storage emulation
 internal/services/compute/  Compute Engine emulation (instances, networks,
                              subnetworks, firewalls, images, disks)
+internal/services/pubsub/         Pub/Sub emulation (topics, subscriptions, publish/pull/ack)
+internal/services/secretmanager/  Secret Manager emulation (secrets, versions)
+internal/services/artifactregistry/ Artifact Registry emulation (repositories)
 web/console/                static frontend (HTML/CSS/JS, no build step)
 scripts/                    scripts to point the gcloud CLI at the emulator
 data/                       runtime embedded data file (gitignored)

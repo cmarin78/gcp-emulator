@@ -12,9 +12,12 @@ import (
 	"os"
 
 	"github.com/cesar/gcp-emulator/internal/server"
+	"github.com/cesar/gcp-emulator/internal/services/artifactregistry"
 	"github.com/cesar/gcp-emulator/internal/services/compute"
 	"github.com/cesar/gcp-emulator/internal/services/gcs"
 	"github.com/cesar/gcp-emulator/internal/services/iam"
+	"github.com/cesar/gcp-emulator/internal/services/pubsub"
+	"github.com/cesar/gcp-emulator/internal/services/secretmanager"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
 
@@ -36,6 +39,9 @@ func main() {
 	iam.New(db).Register(mux)
 	gcs.New(db).Register(mux)
 	compute.New(db).Register(mux)
+	pubsub.New(db).Register(mux)
+	secretmanager.New(db).Register(mux)
+	artifactregistry.New(db).Register(mux)
 
 	// Endpoint de salud, útil para chequear que el emulador está arriba.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +54,7 @@ func main() {
 	}
 
 	log.Printf("GCP Emulator escuchando en %s (db=%s, web=%s)", *addr, *dbPath, *staticDir)
-	log.Printf("Endpoints: /storage/v1/*  /compute/v1/*  /v1/* (IAM)  /healthz")
+	log.Printf("Endpoints: /storage/v1/*  /compute/v1/*  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry)  /healthz")
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		log.Fatal(err)
 	}

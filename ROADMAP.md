@@ -42,16 +42,16 @@ funciona `google_storage_bucket` y `google_service_account`).
 | IAM bindings a nivel de recurso (bucket, service account) | storage/iam (ya existen) | `google_storage_bucket_iam_*`, `google_service_account_iam_*` | M |
 | `resourcemanager.projects` (create/get) | — | Opcional: hoy "project" es un string opaco y ya funciona así; esto es solo para mayor realismo | S (baja prioridad) |
 
-## Fase 3 — Servicios independientes de alto valor
+## Fase 3 — Servicios independientes de alto valor ✅ completada
 
 Sin dependencias entre sí ni con fases anteriores; se pueden hacer en
 cualquier orden o en paralelo.
 
-| Servicio | Recursos mínimos | Esfuerzo |
-|---|---|---|
-| Pub/Sub | topics, subscriptions (subscriptions depende de topics) | M |
-| Secret Manager | secrets, versions | S |
-| Artifact Registry | repositories | S |
+| Servicio | Recursos mínimos | Esfuerzo | Estado |
+|---|---|---|---|
+| Pub/Sub | topics, subscriptions (subscriptions depende de topics) | M | ✅ |
+| Secret Manager | secrets, versions | S | ✅ |
+| Artifact Registry | repositories | S | ✅ |
 
 ## Fase 4 — Cómputo serverless
 
