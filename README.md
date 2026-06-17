@@ -59,15 +59,29 @@ Implemented (functional subset, not exhaustive):
   create/get/list/update/delete), modeled as backed by a synthesized Cloud
   Run service (`serviceConfig.service`/`.uri`), matching how Gen2 actually
   works on real GCP; mutations also return an `Operation`.
+- **Cloud SQL**: instances, databases, and users
+  (`/sql/v1beta4/projects/{p}/instances[/...]`), with mutations returning a
+  `sqladmin#operation` resource (status always `DONE`) and a matching
+  `operations.get` endpoint for clients that poll.
+- **Firestore**: databases (admin API,
+  `/v1/projects/{p}/databases[/{database}]`) and simple document CRUD
+  (`/v1/projects/{p}/databases/{database}/documents/{collection}[/{docId}]`).
+  Document `fields` are stored and returned as opaque passthrough JSON
+  rather than the full typed Firestore Value wire format — enough for
+  create/get/update/delete/list, not for structured queries.
+- **BigQuery**: datasets and tables
+  (`/bigquery/v2/projects/{p}/datasets[/{dataset}[/tables[/{table}]]]`).
+  Unlike the other v2-era services, BigQuery's real API is synchronous, so
+  mutations return the resource directly (no `Operation`).
 - **Web console** (`web/console`): minimal UI to view and manage buckets,
   instances, and service accounts.
 - Verified end-to-end with a real `terraform apply`/`destroy` against
   `google_compute_network` + `google_compute_instance` (boot disk +
-  network interface), and separately against `google_cloud_run_v2_service`
-  — both apply and destroy cleanly, no provider patches needed.
+  network interface), against `google_cloud_run_v2_service`, and against
+  `google_bigquery_dataset` + `google_bigquery_table` — all apply and
+  destroy cleanly, no provider patches needed.
 
-Roadmap / what's next: Cloud SQL, Firestore, BigQuery, and observability
-stubs (KMS, Logging, Monitoring).
+Roadmap / what's next: observability stubs (KMS, Logging, Monitoring).
 See [ROADMAP.md](ROADMAP.md) for the full phased plan. The architecture
 (`internal/services/<service>`) is designed so new services can be added
 without touching existing ones.
@@ -87,6 +101,9 @@ internal/services/secretmanager/  Secret Manager emulation (secrets, versions)
 internal/services/artifactregistry/ Artifact Registry emulation (repositories)
 internal/services/cloudrun/         Cloud Run emulation (v2 services)
 internal/services/cloudfunctions/   Cloud Functions emulation (Gen2 functions)
+internal/services/cloudsql/         Cloud SQL Admin emulation (instances, databases, users)
+internal/services/firestore/        Firestore emulation (databases, simple document CRUD)
+internal/services/bigquery/         BigQuery emulation (datasets, tables)
 web/console/                static frontend (HTML/CSS/JS, no build step)
 scripts/                    scripts to point the gcloud CLI at the emulator
 data/                       runtime embedded data file (gitignored)
@@ -251,6 +268,36 @@ resource "google_cloud_run_v2_service" "default" {
   }
 }
 ```
+
+BigQuery uses `big_query_custom_endpoint`:
+
+```hcl
+provider "google" {
+  project                   = "demo-project"
+  region                    = "us-central1"
+  access_token              = "dummy-token"
+  big_query_custom_endpoint = "http://localhost:8443/bigquery/v2/"
+}
+
+resource "google_bigquery_dataset" "default" {
+  dataset_id = "tf_dataset"
+  location   = "US"
+}
+
+resource "google_bigquery_table" "default" {
+  dataset_id          = google_bigquery_dataset.default.dataset_id
+  table_id            = "tf_table"
+  deletion_protection = false
+
+  schema = jsonencode([
+    { name = "id", type = "STRING" },
+  ])
+}
+```
+
+(`deletion_protection = false` is required by the provider itself to allow
+`terraform destroy` on a table — it's a client-side guard, not something
+the emulator enforces.)
 
 ## Trying it without gcloud (curl)
 

@@ -13,9 +13,12 @@ import (
 
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/services/artifactregistry"
+	"github.com/cesar/gcp-emulator/internal/services/bigquery"
 	"github.com/cesar/gcp-emulator/internal/services/cloudfunctions"
 	"github.com/cesar/gcp-emulator/internal/services/cloudrun"
+	"github.com/cesar/gcp-emulator/internal/services/cloudsql"
 	"github.com/cesar/gcp-emulator/internal/services/compute"
+	"github.com/cesar/gcp-emulator/internal/services/firestore"
 	"github.com/cesar/gcp-emulator/internal/services/gcs"
 	"github.com/cesar/gcp-emulator/internal/services/iam"
 	"github.com/cesar/gcp-emulator/internal/services/pubsub"
@@ -47,6 +50,9 @@ func main() {
 	cloudrun.New(db).Register(mux)
 	cloudfunctions.New(db).Register(mux)
 	server.RegisterV2Operations(mux)
+	cloudsql.New(db).Register(mux)
+	firestore.New(db).Register(mux)
+	bigquery.New(db).Register(mux)
 
 	// Endpoint de salud, útil para chequear que el emulador está arriba.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +65,7 @@ func main() {
 	}
 
 	log.Printf("GCP Emulator escuchando en %s (db=%s, web=%s)", *addr, *dbPath, *staticDir)
-	log.Printf("Endpoints: /storage/v1/*  /compute/v1/*  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry)  /v2/* (Cloud Run, Cloud Functions)  /healthz")
+	log.Printf("Endpoints: /storage/v1/*  /compute/v1/*  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry, Firestore)  /v2/* (Cloud Run, Cloud Functions)  /sql/v1beta4/* (Cloud SQL)  /bigquery/v2/* (BigQuery)  /healthz")
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		log.Fatal(err)
 	}

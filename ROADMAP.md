@@ -20,6 +20,9 @@ own `Register(mux)`, following the pattern already used by IAM/GCS/Compute.
 - Artifact Registry: repositories, longrunning operations.
 - Cloud Run: v2 services (create/get/list/update/delete), longrunning operations.
 - Cloud Functions: Gen2 functions (create/get/list/update/delete), longrunning operations.
+- Cloud SQL: instances, databases, users, sqladmin#operation + operations.get.
+- Firestore: databases (admin), simple document CRUD (fields as passthrough JSON).
+- BigQuery: datasets, tables (synchronous, no Operation).
 
 ## Phase 1 — Complete Compute for real IaC
 
@@ -74,16 +77,26 @@ centrally (`server.RegisterV2Operations`) instead of per-service. Verified
 with `terraform apply`/`destroy` against `google_cloud_run_v2_service` using
 `cloud_run_v2_custom_endpoint` in the provider block.
 
-## Phase 5 — Data
+## Phase 5 — Data ✅ completed
 
 Independent of each other; each is a new package similar in size to the
 current Compute/Storage.
 
-| Service | Minimum resources | Effort |
-|---|---|---|
-| Cloud SQL | instances, databases, users | L |
-| Firestore | databases, documents (simple CRUD) | L |
-| BigQuery | datasets, tables | M |
+| Service | Minimum resources | Effort | Status |
+|---|---|---|---|
+| Cloud SQL | instances, databases, users | L | ✅ |
+| Firestore | databases, documents (simple CRUD) | L | ✅ |
+| BigQuery | datasets, tables | M | ✅ |
+
+Cloud SQL and Firestore mutations return their respective async-style
+`Operation` resource (`sqladmin#operation` / `google.longrunning.Operation`),
+always resolved (`status: DONE` / `done: true`), matching how the real APIs
+shape responses even though the emulator does everything synchronously.
+BigQuery's real API is synchronous, so its mutations return the resource
+directly. Verified with `terraform apply`/`destroy` against
+`google_bigquery_dataset` + `google_bigquery_table` using
+`big_query_custom_endpoint` (note: the provider itself requires
+`deletion_protection = false` on the table to allow `terraform destroy`).
 
 ## Phase 6 — Observability and governance (low priority)
 
@@ -99,5 +112,5 @@ current Compute/Storage.
 2. Phase 3 (Pub/Sub, Secret Manager, Artifact Registry) — high value, zero dependencies, low/medium effort.
 3. Phase 2 (Advanced IAM) — reinforces what already exists.
 4. Phase 4 (Cloud Run / Functions) — more effort, larger API surface. ✅ done.
-5. Phase 5 (data) — the most expensive to implement, best left until the service pattern is well polished. ← next.
-6. Phase 6 — whenever a concrete use case needs it.
+5. Phase 5 (data) — the most expensive to implement, best left until the service pattern is well polished. ✅ done.
+6. Phase 6 — whenever a concrete use case needs it. ← next.

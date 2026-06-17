@@ -1,0 +1,481 @@
+// Package cloudsql emula un subconjunto de la API de Cloud SQL Admin
+// (sqladmin.googleapis.com/sql/v1beta4): instancias, bases de datos y
+// usuarios. Las mutaciones sobre instancias y bases de datos devuelven un
+// recurso "Operation" (siempre resuelto, status=DONE), igual que la API
+// real, para compatibilidad con clientes que hacen polling.
+package cloudsql
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/cesar/gcp-emulator/internal/server"
+	"github.com/cesar/gcp-emulator/internal/storage"
+)
+
+const (
+	bucketInstances = "cloudsql.instances"
+	bucketDatabases = "cloudsql.databases"
+	bucketUsers     = "cloudsql.users"
+	bucketOps       = "cloudsql.operations"
+)
+
+// Settings replica el subconjunto relevante de sqladmin.Settings.
+type Settings struct {
+	Tier             string `json:"tier"`
+	DataDiskSizeGb   string `json:"dataDiskSizeGb,omitempty"`
+	DataDiskType     string `json:"dataDiskType,omitempty"`
+	ActivationPolicy string `json:"activationPolicy,omitempty"`
+	AvailabilityType string `json:"availabilityType,omitempty"`
+}
+
+// IPMapping replica sqladmin.IpMapping.
+type IPMapping struct {
+	Type   string `json:"type"`
+	IPAddr string `json:"ipAddress"`
+}
+
+// DatabaseInstance replica sqladmin.DatabaseInstance.
+type DatabaseInstance struct {
+	Kind            string      `json:"kind"`
+	Name            string      `json:"name"`
+	Project         string      `json:"project"`
+	Region          string      `json:"region"`
+	DatabaseVersion string      `json:"databaseVersion"`
+	Settings        Settings    `json:"settings"`
+	State           string      `json:"state"`
+	ConnectionName  string      `json:"connectionName"`
+	IPAddresses     []IPMapping `json:"ipAddresses"`
+	SelfLink        string      `json:"selfLink"`
+	InstanceType    string      `json:"instanceType,omitempty"`
+}
+
+// Database replica sqladmin.Database.
+type Database struct {
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Project   string `json:"project"`
+	Instance  string `json:"instance"`
+	Charset   string `json:"charset,omitempty"`
+	Collation string `json:"collation,omitempty"`
+	SelfLink  string `json:"selfLink"`
+}
+
+// User replica sqladmin.User.
+type User struct {
+	Kind     string `json:"kind"`
+	Name     string `json:"name"`
+	Project  string `json:"project"`
+	Instance string `json:"instance"`
+	Host     string `json:"host,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+// Operation replica sqladmin.Operation.
+type Operation struct {
+	Kind          string `json:"kind"`
+	TargetLink    string `json:"targetLink,omitempty"`
+	Status        string `json:"status"`
+	User          string `json:"user,omitempty"`
+	InsertTime    string `json:"insertTime,omitempty"`
+	StartTime     string `json:"startTime,omitempty"`
+	EndTime       string `json:"endTime,omitempty"`
+	OperationType string `json:"operationType"`
+	Name          string `json:"name"`
+	TargetID      string `json:"targetId,omitempty"`
+	SelfLink      string `json:"selfLink,omitempty"`
+	TargetProject string `json:"targetProject,omitempty"`
+}
+
+type Svc struct {
+	db  *storage.DB
+	seq int64
+}
+
+func New(db *storage.DB) *Svc {
+	return &Svc{db: db}
+}
+
+// Register monta las rutas de Cloud SQL Admin, siguiendo los paths reales
+// de sqladmin.googleapis.com/sql/v1beta4. A diferencia de Cloud Run/Functions,
+// este base path (/sql/v1beta4) no es compartido con ningún otro servicio,
+// así que las operaciones se registran directamente aquí.
+func (s *Svc) Register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /sql/v1beta4/projects/{project}/instances", s.createInstance)
+	mux.HandleFunc("GET /sql/v1beta4/projects/{project}/instances", s.listInstances)
+	mux.HandleFunc("GET /sql/v1beta4/projects/{project}/instances/{instance}", s.getInstance)
+	mux.HandleFunc("PATCH /sql/v1beta4/projects/{project}/instances/{instance}", s.patchInstance)
+	mux.HandleFunc("DELETE /sql/v1beta4/projects/{project}/instances/{instance}", s.deleteInstance)
+
+	mux.HandleFunc("POST /sql/v1beta4/projects/{project}/instances/{instance}/databases", s.createDatabase)
+	mux.HandleFunc("GET /sql/v1beta4/projects/{project}/instances/{instance}/databases", s.listDatabases)
+	mux.HandleFunc("GET /sql/v1beta4/projects/{project}/instances/{instance}/databases/{database}", s.getDatabase)
+	mux.HandleFunc("PATCH /sql/v1beta4/projects/{project}/instances/{instance}/databases/{database}", s.patchDatabase)
+	mux.HandleFunc("DELETE /sql/v1beta4/projects/{project}/instances/{instance}/databases/{database}", s.deleteDatabase)
+
+	mux.HandleFunc("POST /sql/v1beta4/projects/{project}/instances/{instance}/users", s.createUser)
+	mux.HandleFunc("GET /sql/v1beta4/projects/{project}/instances/{instance}/users", s.listUsers)
+	mux.HandleFunc("DELETE /sql/v1beta4/projects/{project}/instances/{instance}/users", s.deleteUser)
+
+	mux.HandleFunc("GET /sql/v1beta4/projects/{project}/operations/{operation}", s.getOperation)
+}
+
+func instanceKey(project, instance string) string {
+	return fmt.Sprintf("%s/%s", project, instance)
+}
+
+func databaseKey(project, instance, database string) string {
+	return fmt.Sprintf("%s/%s/%s", project, instance, database)
+}
+
+func userKey(project, instance, host, name string) string {
+	return fmt.Sprintf("%s/%s/%s/%s", project, instance, host, name)
+}
+
+func (s *Svc) nextOpName() string {
+	s.seq++
+	return fmt.Sprintf("op-%d", s.seq)
+}
+
+func (s *Svc) writeOperation(w http.ResponseWriter, project, opType, targetID, targetLink string) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	op := Operation{
+		Kind:          "sql#operation",
+		Status:        "DONE",
+		OperationType: opType,
+		Name:          s.nextOpName(),
+		TargetID:      targetID,
+		TargetLink:    targetLink,
+		TargetProject: project,
+		InsertTime:    now,
+		StartTime:     now,
+		EndTime:       now,
+		SelfLink:      fmt.Sprintf("projects/%s/operations/%s", project, ""),
+	}
+	op.SelfLink = fmt.Sprintf("projects/%s/operations/%s", project, op.Name)
+	_ = s.db.Put(bucketOps, fmt.Sprintf("%s/%s", project, op.Name), op)
+	server.WriteJSON(w, 200, op)
+}
+
+func (s *Svc) getOperation(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	opName := r.PathValue("operation")
+	var op Operation
+	found, err := s.db.Get(bucketOps, fmt.Sprintf("%s/%s", project, opName), &op)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "operación no encontrada")
+		return
+	}
+	server.WriteJSON(w, 200, op)
+}
+
+func (s *Svc) createInstance(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	var body struct {
+		Name            string   `json:"name"`
+		Region          string   `json:"region"`
+		DatabaseVersion string   `json:"databaseVersion"`
+		Settings        Settings `json:"settings"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if body.Name == "" {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
+		return
+	}
+	inst := DatabaseInstance{
+		Kind:            "sql#instance",
+		Name:            body.Name,
+		Project:         project,
+		Region:          orDefault(body.Region, "us-central1"),
+		DatabaseVersion: orDefault(body.DatabaseVersion, "POSTGRES_15"),
+		Settings:        body.Settings,
+		State:           "RUNNABLE",
+		ConnectionName:  fmt.Sprintf("%s:%s:%s", project, orDefault(body.Region, "us-central1"), body.Name),
+		IPAddresses: []IPMapping{
+			{Type: "PRIMARY", IPAddr: fmt.Sprintf("10.0.%d.10", len(body.Name)%255)},
+		},
+		SelfLink: fmt.Sprintf("projects/%s/instances/%s", project, body.Name),
+	}
+	if inst.Settings.Tier == "" {
+		inst.Settings.Tier = "db-f1-micro"
+	}
+	if err := s.db.Put(bucketInstances, instanceKey(project, inst.Name), inst); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	s.writeOperation(w, project, "CREATE", inst.Name, inst.SelfLink)
+}
+
+func (s *Svc) listInstances(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	prefix := project + "/"
+	items := []DatabaseInstance{}
+	_ = s.db.List(bucketInstances, prefix, func(key string, raw []byte) error {
+		var inst DatabaseInstance
+		if err := json.Unmarshal(raw, &inst); err != nil {
+			return err
+		}
+		items = append(items, inst)
+		return nil
+	})
+	server.WriteJSON(w, 200, map[string]any{"kind": "sql#instancesList", "items": items})
+}
+
+func (s *Svc) getInstance(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	var inst DatabaseInstance
+	found, err := s.db.Get(bucketInstances, instanceKey(project, instance), &inst)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "instancia no encontrada")
+		return
+	}
+	server.WriteJSON(w, 200, inst)
+}
+
+func (s *Svc) patchInstance(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	var existing DatabaseInstance
+	found, err := s.db.Get(bucketInstances, instanceKey(project, instance), &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "instancia no encontrada")
+		return
+	}
+	var body struct {
+		Settings Settings `json:"settings"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if body.Settings.Tier != "" {
+		existing.Settings.Tier = body.Settings.Tier
+	}
+	if body.Settings.DataDiskSizeGb != "" {
+		existing.Settings.DataDiskSizeGb = body.Settings.DataDiskSizeGb
+	}
+	if body.Settings.ActivationPolicy != "" {
+		existing.Settings.ActivationPolicy = body.Settings.ActivationPolicy
+	}
+	if body.Settings.AvailabilityType != "" {
+		existing.Settings.AvailabilityType = body.Settings.AvailabilityType
+	}
+	if err := s.db.Put(bucketInstances, instanceKey(project, instance), existing); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	s.writeOperation(w, project, "UPDATE", instance, existing.SelfLink)
+}
+
+func (s *Svc) deleteInstance(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	if err := s.db.Delete(bucketInstances, instanceKey(project, instance)); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	s.writeOperation(w, project, "DELETE", instance, "")
+}
+
+func (s *Svc) createDatabase(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	var body struct {
+		Name      string `json:"name"`
+		Charset   string `json:"charset"`
+		Collation string `json:"collation"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if body.Name == "" {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
+		return
+	}
+	dbRes := Database{
+		Kind:      "sql#database",
+		Name:      body.Name,
+		Project:   project,
+		Instance:  instance,
+		Charset:   orDefault(body.Charset, "UTF8"),
+		Collation: orDefault(body.Collation, "en_US.UTF8"),
+		SelfLink:  fmt.Sprintf("projects/%s/instances/%s/databases/%s", project, instance, body.Name),
+	}
+	if err := s.db.Put(bucketDatabases, databaseKey(project, instance, body.Name), dbRes); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	s.writeOperation(w, project, "CREATE_DATABASE", body.Name, dbRes.SelfLink)
+}
+
+func (s *Svc) listDatabases(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	prefix := fmt.Sprintf("%s/%s/", project, instance)
+	items := []Database{}
+	_ = s.db.List(bucketDatabases, prefix, func(key string, raw []byte) error {
+		var d Database
+		if err := json.Unmarshal(raw, &d); err != nil {
+			return err
+		}
+		items = append(items, d)
+		return nil
+	})
+	server.WriteJSON(w, 200, map[string]any{"kind": "sql#databasesList", "items": items})
+}
+
+func (s *Svc) getDatabase(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	database := r.PathValue("database")
+	var d Database
+	found, err := s.db.Get(bucketDatabases, databaseKey(project, instance, database), &d)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "base de datos no encontrada")
+		return
+	}
+	server.WriteJSON(w, 200, d)
+}
+
+func (s *Svc) patchDatabase(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	database := r.PathValue("database")
+	var existing Database
+	found, err := s.db.Get(bucketDatabases, databaseKey(project, instance, database), &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "base de datos no encontrada")
+		return
+	}
+	var body struct {
+		Charset   string `json:"charset"`
+		Collation string `json:"collation"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if body.Charset != "" {
+		existing.Charset = body.Charset
+	}
+	if body.Collation != "" {
+		existing.Collation = body.Collation
+	}
+	if err := s.db.Put(bucketDatabases, databaseKey(project, instance, database), existing); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	s.writeOperation(w, project, "UPDATE_DATABASE", database, existing.SelfLink)
+}
+
+func (s *Svc) deleteDatabase(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	database := r.PathValue("database")
+	if err := s.db.Delete(bucketDatabases, databaseKey(project, instance, database)); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	s.writeOperation(w, project, "DELETE_DATABASE", database, "")
+}
+
+func (s *Svc) createUser(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	var body struct {
+		Name     string `json:"name"`
+		Host     string `json:"host"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if body.Name == "" {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
+		return
+	}
+	host := orDefault(body.Host, "%")
+	usr := User{
+		Kind:     "sql#user",
+		Name:     body.Name,
+		Project:  project,
+		Instance: instance,
+		Host:     host,
+		Password: body.Password,
+	}
+	if err := s.db.Put(bucketUsers, userKey(project, instance, host, body.Name), usr); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	s.writeOperation(w, project, "CREATE_USER", body.Name, "")
+}
+
+func (s *Svc) listUsers(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	prefix := fmt.Sprintf("%s/%s/", project, instance)
+	items := []User{}
+	_ = s.db.List(bucketUsers, prefix, func(key string, raw []byte) error {
+		var u User
+		if err := json.Unmarshal(raw, &u); err != nil {
+			return err
+		}
+		u.Password = "" // la API real nunca devuelve el password en list/get
+		items = append(items, u)
+		return nil
+	})
+	server.WriteJSON(w, 200, map[string]any{"kind": "sql#usersList", "items": items})
+}
+
+// deleteUser usa query params (?host=&name=), igual que la API real,
+// porque el nombre de usuario no es único sin el host.
+func (s *Svc) deleteUser(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	name := r.URL.Query().Get("name")
+	host := orDefault(r.URL.Query().Get("host"), "%")
+	if name == "" {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
+		return
+	}
+	if err := s.db.Delete(bucketUsers, userKey(project, instance, host, name)); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	s.writeOperation(w, project, "DELETE_USER", name, "")
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
