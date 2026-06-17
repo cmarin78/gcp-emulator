@@ -1,99 +1,124 @@
+<p align="center">
+  <img src="docs/banner.svg" alt="GCP Emulator" width="720">
+</p>
+
 # GCP Emulator
 
-Emulador local de Google Cloud Platform escrito en Go. Expone APIs REST
-compatibles con `storage.googleapis.com`, `compute.googleapis.com` e
-`iam.googleapis.com`, persiste todo en un único archivo embebido (BoltDB)
-y trae una consola web simple (clon liviano de Google Cloud Console) para
-inspeccionar los recursos.
+A local Google Cloud Platform emulator written in Go. It exposes REST APIs
+compatible with `storage.googleapis.com`, `compute.googleapis.com`, and
+`iam.googleapis.com`, persists everything in a single embedded file
+(BoltDB), and ships with a lightweight web console (a thin clone of the
+Google Cloud Console) for inspecting resources.
 
-Objetivo: un binario portable (sin Docker, sin Postgres, sin nada externo)
-que corra igual en Windows, Linux o macOS, y contra el cual se pueda usar
-`gcloud` CLI y los SDKs oficiales de Google apuntando a `localhost`.
+Goal: a portable binary (no Docker, no Postgres, nothing external
+required) that runs the same way on Windows, Linux, or macOS, against
+which you can point the real `gcloud` CLI and the official Google SDKs by
+overriding their API endpoints to `localhost`.
 
-## Estado actual
+## Current status
 
-Implementado (subset funcional, no exhaustivo):
+Implemented (functional subset, not exhaustive):
 
-- **IAM**: crear/listar/obtener/borrar service accounts, get/set de IAM
-  policy a nivel de proyecto, lista de roles predefinidos básicos.
-- **Cloud Storage (GCS)**: crear/listar/obtener/borrar buckets; subir
-  (`uploadType=media`), listar, descargar (`alt=media`) y borrar objetos.
-- **Compute Engine**: listar zonas y machine types (estáticos), crear/
-  listar/obtener/borrar instancias, start/stop, y recurso `Operation`
-  (síncrono) para compatibilidad con el flujo real de gcloud.
-- **Consola web** (`web/console`): UI mínima para ver y administrar
-  buckets, instancias y service accounts.
+- **IAM**: create/list/get/delete service accounts, get/set project-level
+  IAM policy, list of basic predefined roles.
+- **Cloud Storage (GCS)**: create/list/get/delete buckets; upload
+  (`uploadType=media`), list, download (`alt=media`), and delete objects.
+- **Compute Engine**:
+  - Instances: create/list/get/delete, start/stop, with real
+    `disks[]` and `networkInterfaces[]` (boot disks are created
+    automatically from `initializeParams`, network/subnetwork references
+    are normalized, and fake internal/external IPs are assigned).
+  - Networking: `compute.networks` (VPC, global), `compute.subnetworks`
+    (regional), `compute.firewalls` (global).
+  - `compute.disks` (zonal), `compute.images` (static read-only catalog:
+    debian-12, debian-11, ubuntu-2204-lts, cos-stable).
+  - Static zones/machine types, singular `zones/{zone}` and
+    `regions/{region}` lookups, and the `Operation` resource (synchronous)
+    for compatibility with the real `gcloud`/Terraform flow.
+- **Web console** (`web/console`): minimal UI to view and manage buckets,
+  instances, and service accounts.
+- Verified end-to-end with a real `terraform apply`/`destroy` against
+  `google_compute_network` + `google_compute_instance` (boot disk +
+  network interface) — applies and destroys cleanly, no provider patches
+  needed.
 
-Pendiente / roadmap natural: Pub/Sub, Cloud Functions, Cloud Run,
-Firestore, BigQuery, autenticación OAuth simulada más completa,
-SQL emulado, etc. La arquitectura (`internal/services/<servicio>`) está
-pensada para agregar servicios nuevos sin tocar los existentes.
+Roadmap / what's next: Pub/Sub, Secret Manager, Artifact Registry, Cloud
+Run, Cloud Functions, Cloud SQL, Firestore, BigQuery, advanced IAM
+(custom roles, SA keys, resource-level bindings), and observability
+stubs (KMS, Logging, Monitoring). See [ROADMAP.md](ROADMAP.md) for the
+full phased plan. The architecture (`internal/services/<service>`) is
+designed so new services can be added without touching existing ones.
 
-## Estructura
+## Project structure
 
 ```
-cmd/server/main.go          punto de entrada, arma el server HTTP
-internal/storage/           persistencia embebida (BoltDB)
-internal/server/            router, middlewares, helpers JSON/error, Operations
-internal/services/iam/      emulación de IAM
-internal/services/gcs/      emulación de Cloud Storage
-internal/services/compute/  emulación de Compute Engine
-web/console/                frontend estático (HTML/CSS/JS sin build step)
-scripts/                    scripts para apuntar gcloud CLI al emulador
-data/                       archivo de datos embebido en runtime (gitignored)
+cmd/server/main.go          entry point, wires up the HTTP server
+internal/storage/           embedded persistence (BoltDB)
+internal/server/            router, middlewares, JSON/error helpers, Operations
+internal/services/iam/      IAM emulation
+internal/services/gcs/      Cloud Storage emulation
+internal/services/compute/  Compute Engine emulation (instances, networks,
+                             subnetworks, firewalls, images, disks)
+web/console/                static frontend (HTML/CSS/JS, no build step)
+scripts/                    scripts to point the gcloud CLI at the emulator
+data/                       runtime embedded data file (gitignored)
 ```
 
-## Requisitos
+## Requirements
 
-- Go 1.22+ (usa `net/http` con routing por método/patrón, sin frameworks).
-- gcloud CLI (opcional, para probar comandos reales contra el emulador).
+- Go 1.22+ (uses `net/http` with method/pattern routing, no frameworks).
+- gcloud CLI / Terraform (optional, to exercise real commands against the
+  emulator).
 
-> Nota: este repo no embebe el toolchain de Go. Si no lo tenés instalado,
-> bajalo de https://go.dev/dl/ (o `winget install GoLang.Go` en Windows,
-> `brew install go` en macOS, `apt install golang-go` en Linux).
+> Note: this repo does not bundle the Go toolchain. If you don't have it
+> installed, get it from https://go.dev/dl/ (or `winget install GoLang.Go`
+> on Windows, `brew install go` on macOS, `apt install golang-go` on
+> Linux).
 
-## Levantar el emulador
+## Running the emulator
 
 ```bash
 cd gcp-emulator
-go mod tidy        # descarga la única dependencia externa: go.etcd.io/bbolt
+go mod tidy        # downloads the single external dependency: go.etcd.io/bbolt
 go run ./cmd/server
 ```
 
-Por defecto escucha en `:8443`, persiste en `data/emulator.db` y sirve la
-consola web en `/`. Se puede configurar con flags o variables de entorno:
+By default it listens on `:8443`, persists to `data/emulator.db`, and
+serves the web console at `/`. It can be configured with flags or
+environment variables:
 
 ```bash
-go run ./cmd/server -addr :9000 -db data/otro.db -web web/console
-# o
-EMULATOR_ADDR=:9000 EMULATOR_DB=data/otro.db go run ./cmd/server
+go run ./cmd/server -addr :9000 -db data/other.db -web web/console
+# or
+EMULATOR_ADDR=:9000 EMULATOR_DB=data/other.db go run ./cmd/server
 ```
 
-Para producir un binario portable:
+To produce a portable binary:
 
 ```bash
 go build -o bin/gcp-emulator ./cmd/server
 ./bin/gcp-emulator
 ```
 
-Abrí `http://localhost:8443` para la consola web.
+Open `http://localhost:8443` for the web console.
 
-## Levantar con Docker (recomendado: portable y sin instalar Go)
+## Running with Docker (recommended: portable, no Go install needed)
 
 ```bash
 docker compose up --build -d
-# o, sin compose:
+# or, without compose:
 docker build -t gcp-emulator .
 docker run --rm -p 8443:8443 -v emulator-data:/data gcp-emulator
 ```
 
-La imagen es multi-stage (build con `golang:1.22-alpine`, runtime en
-`alpine` sin toolchain) y corre como usuario no-root. Los datos persisten
-en el volumen `emulator-data` (`/data/emulator.db` dentro del contenedor),
-así que sobreviven a `docker compose down` / recreaciones del contenedor
-(no a `docker compose down -v`, que borra también el volumen).
+The image is multi-stage (built with `golang:1.22-alpine`, runtime on
+plain `alpine`, no toolchain in the final image) and runs as a non-root
+user. Data persists in the `emulator-data` volume (`/data/emulator.db`
+inside the container), so it survives `docker compose down` /
+container recreation (but not `docker compose down -v`, which also wipes
+the volume).
 
-## Usar gcloud CLI contra el emulador
+## Using the gcloud CLI against the emulator
 
 ```bash
 # Linux/macOS
@@ -103,50 +128,105 @@ así que sobreviven a `docker compose down` / recreaciones del contenedor
 .\scripts\configure-gcloud.ps1 http://localhost:8443
 ```
 
-Esto configura `api_endpoint_overrides` para storage/compute/iam apuntando
-al emulador (storage e iam usan distinta forma de URL porque sus clientes
-arman el path de manera distinta: storage y compute necesitan el `v1/` en
-el override, iam lo agrega solo). gcloud además exige una cuenta "activa";
-si ya tenés una sesión logueada en tu configuración `default`, alcanza con
-reusarla (el script lo hace automáticamente) — el emulador no valida el
-token. Luego, por ejemplo:
+This configures `api_endpoint_overrides` for storage/compute/iam pointing
+at the emulator (storage and iam use a slightly different URL shape
+because their clients build the path differently: storage and compute
+need the `v1/` in the override, iam appends it itself). gcloud also
+requires an "active" account; if you already have a logged-in session in
+your `default` configuration, it's enough to reuse it (the script does
+this automatically) — the emulator doesn't validate the token. Then, for
+example:
 
 ```bash
-gcloud storage buckets create gs://mi-bucket --project=demo-project
+gcloud storage buckets create gs://my-bucket --project=demo-project
 gcloud storage buckets list
-gcloud compute instances create mi-vm --zone=us-central1-a --project=demo-project
+gcloud compute instances create my-vm --zone=us-central1-a --project=demo-project
 gcloud compute instances list --zones=us-central1-a --project=demo-project
 gcloud iam service-accounts create demo-sa --display-name="Demo SA" --project=demo-project
 gcloud iam service-accounts list --project=demo-project
 ```
 
-Tip: usá una `gcloud configuration` separada (`gcloud config configurations
-create emulator-test`) para no pisar tu configuración real mientras probás.
-Para volver a la GCP real, creá/activá otra `gcloud configuration`:
+Tip: use a separate `gcloud configuration` (`gcloud config configurations
+create emulator-test`) so you don't overwrite your real configuration
+while testing. To go back to real GCP, create/activate another
+configuration:
 
 ```bash
 gcloud config configurations create real-gcp
 gcloud config configurations activate real-gcp
 ```
 
-## Probar sin gcloud (curl)
+## Using Terraform against the emulator
 
-```bash
-curl -X POST localhost:8443/storage/v1/b -d '{"name":"mi-bucket"}'
-curl localhost:8443/storage/v1/b
+Point the `google` provider's custom endpoints at the emulator and use a
+dummy static access token to skip real OAuth:
 
-curl -X POST "localhost:8443/upload/storage/v1/b/mi-bucket/o?name=hola.txt" \
-  -H "Content-Type: text/plain" --data-binary "hola mundo"
-curl "localhost:8443/storage/v1/b/mi-bucket/o/hola.txt?alt=media"
+```hcl
+provider "google" {
+  project                 = "demo-project"
+  region                  = "us-central1"
+  zone                    = "us-central1-a"
+  access_token            = "dummy-token"
+  storage_custom_endpoint = "http://localhost:8443/storage/v1/"
+  compute_custom_endpoint = "http://localhost:8443/compute/v1/"
+}
+
+resource "google_compute_network" "vpc" {
+  name                    = "tf-vpc"
+  auto_create_subnetworks = true
+}
+
+resource "google_compute_instance" "vm" {
+  name         = "tf-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+      size  = 20
+    }
+  }
+
+  network_interface {
+    network = google_compute_network.vpc.name
+    access_config {}
+  }
+}
 ```
 
-## Diseño
+`terraform apply` / `terraform destroy` work against this without any
+provider patches.
 
-- **Portabilidad**: un solo binario Go + un archivo BoltDB. No requiere
-  Docker, ni base de datos externa, ni variables de entorno obligatorias.
-- **Compatibilidad de API**: las rutas HTTP replican los paths reales de
-  las APIs de Google (`/storage/v1/b/...`, `/compute/v1/projects/.../zones/...`)
-  para que `api_endpoint_overrides` de gcloud y los SDKs oficiales puedan
-  apuntar directo al emulador sin parches.
-- **Extensible**: cada servicio vive en `internal/services/<nombre>` con su
-  propio `Register(mux)`; agregar un servicio nuevo no toca los existentes.
+## Trying it without gcloud (curl)
+
+```bash
+curl -X POST localhost:8443/storage/v1/b -d '{"name":"my-bucket"}'
+curl localhost:8443/storage/v1/b
+
+curl -X POST "localhost:8443/upload/storage/v1/b/my-bucket/o?name=hello.txt" \
+  -H "Content-Type: text/plain" --data-binary "hello world"
+curl "localhost:8443/storage/v1/b/my-bucket/o/hello.txt?alt=media"
+```
+
+## Design
+
+- **Portability**: a single Go binary plus a single BoltDB file. No
+  Docker, no external database, no required environment variables.
+- **API compatibility**: HTTP routes replicate the real Google API paths
+  (`/storage/v1/b/...`, `/compute/v1/projects/.../zones/...`) so that
+  `api_endpoint_overrides` in gcloud, the official SDKs, and Terraform's
+  `google` provider can point straight at the emulator without patches.
+  This includes faithfully reproducing subtle response-shape details the
+  real clients rely on — e.g. numeric `id` fields serialized as strings,
+  and objects like `metadata`/`tags`/`scheduling` on instances always
+  being present and non-null, since some clients dereference them
+  without a nil check.
+- **Extensible**: each service lives in `internal/services/<name>` with
+  its own `Register(mux)`; adding a new service doesn't touch existing
+  ones.
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for the full list of planned services and
+resources, grouped into phases by dependency and value.

@@ -1,0 +1,67 @@
+<svg viewBox="0 0 900 320" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a73e8"/>
+      <stop offset="100%" stop-color="#0d47a1"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f1f5fb"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="900" height="320" rx="18" fill="url(#bg)"/>
+
+  <text x="40" y="58" fill="#ffffff" font-size="34" font-weight="700">GCP Emulator</text>
+  <text x="40" y="86" fill="#dbe7fb" font-size="15">A portable, local Google Cloud emulator written in Go</text>
+
+  <!-- clients -->
+  <g>
+    <rect x="40" y="120" width="150" height="56" rx="10" fill="url(#card)"/>
+    <text x="115" y="143" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a2e">gcloud CLI</text>
+    <text x="115" y="161" text-anchor="middle" font-size="11" fill="#5f6368">Terraform / SDKs</text>
+  </g>
+
+  <path d="M195 148 L260 148" stroke="#ffffff" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- server -->
+  <g>
+    <rect x="265" y="100" width="190" height="120" rx="12" fill="url(#card)"/>
+    <text x="360" y="128" text-anchor="middle" font-size="14" font-weight="700" fill="#1a1a2e">Go HTTP server</text>
+    <text x="360" y="150" text-anchor="middle" font-size="11" fill="#5f6368">REST, gcloud-compatible</text>
+    <rect x="285" y="160" width="70" height="24" rx="6" fill="#1a73e8"/>
+    <text x="320" y="176" text-anchor="middle" font-size="10" fill="#fff">IAM</text>
+    <rect x="360" y="160" width="80" height="24" rx="6" fill="#34a853"/>
+    <text x="400" y="176" text-anchor="middle" font-size="10" fill="#fff">Storage</text>
+    <rect x="285" y="190" width="155" height="24" rx="6" fill="#fbbc04"/>
+    <text x="362" y="206" text-anchor="middle" font-size="10" fill="#1a1a2e">Compute</text>
+  </g>
+
+  <path d="M460 160 L520 160" stroke="#ffffff" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- storage -->
+  <g>
+    <rect x="525" y="120" width="150" height="80" rx="10" fill="url(#card)"/>
+    <text x="600" y="148" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a2e">BoltDB</text>
+    <text x="600" y="166" text-anchor="middle" font-size="11" fill="#5f6368">single embedded file</text>
+    <text x="600" y="182" text-anchor="middle" font-size="11" fill="#5f6368">no external deps</text>
+  </g>
+
+  <path d="M360 220 L360 250" stroke="#ffffff" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- console -->
+  <g>
+    <rect x="265" y="255" width="190" height="40" rx="10" fill="url(#card)"/>
+    <text x="360" y="280" text-anchor="middle" font-size="12" font-weight="600" fill="#1a1a2e">Web console</text>
+  </g>
+
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#ffffff"/>
+    </marker>
+  </defs>
+
+  <text x="700" y="270" fill="#dbe7fb" font-size="12" text-anchor="middle">IAM · Storage</text>
+  <text x="700" y="288" fill="#dbe7fb" font-size="12" text-anchor="middle">Compute (VPC, disks,</text>
+  <text x="700" y="306" fill="#dbe7fb" font-size="12" text-anchor="middle">images, instances)</text>
+</svg>
