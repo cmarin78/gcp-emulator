@@ -77,6 +77,7 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/projects/{project}/instances/{instance}/databases", s.listDatabases)
 	mux.HandleFunc("GET /v1/projects/{project}/instances/{instance}/databases/{database}", s.getDatabase)
 	mux.HandleFunc("DELETE /v1/projects/{project}/instances/{instance}/databases/{database}", s.deleteDatabase)
+	mux.HandleFunc("PATCH /v1/projects/{project}/instances/{instance}/databases/{database}/ddl", s.updateDatabaseDdl)
 
 	mux.HandleFunc("GET /v1/projects/{project}/instances/{instance}/operations/{operation}", s.getOperation)
 }
@@ -289,6 +290,43 @@ func (s *Service) deleteDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	server.WriteJSON(w, 200, map[string]any{})
+}
+
+// updateDatabaseDdl handles UpdateDatabaseDdl (databaseadmin.projects.
+// instances.databases.updateDdl), which Terraform's google_spanner_database
+// resource always calls right after CreateDatabase to apply the
+// extraStatements/ddl list (real Spanner only accepts initial DDL through
+// this separate follow-up call, not inline with create). This emulator
+// already stores ExtraStatements on create, so here it's a no-op that just
+// appends the new statements and reports success — no actual schema
+// validation or execution, consistent with the rest of this package.
+func (s *Service) updateDatabaseDdl(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	database := r.PathValue("database")
+	var d Database
+	found, err := s.db.Get(bucketDatabases, databaseKey(project, instance, database), &d)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "database not found")
+		return
+	}
+	var body struct {
+		Statements []string `json:"statements"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	d.ExtraStatements = append(d.ExtraStatements, body.Statements...)
+	if err := s.db.Put(bucketDatabases, databaseKey(project, instance, database), d); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	s.writeOperation(w, project, instance, "update_database_ddl", d.Name, map[string]any{})
 }
 
 // getOperation always reports the operation as done, since every mutation

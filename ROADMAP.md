@@ -199,3 +199,16 @@ vet`, only by actually running the binary. Fixed by removing the duplicate,
 now-dead routes/handlers from both new services (their mutations already
 resolve synchronously, so no client needs to poll). No leftover artifacts
 after cleanup.
+
+✅ Re-verified 2026-06-18 with **real `gcloud`/Terraform clients** (not
+just direct HTTP calls) — see the "Phase 8 round 2" annex in
+`E2E_TEST_REPORT.md`. A real client exercises follow-up calls a hand-built
+smoke test wouldn't think to make (label reconciliation, post-apply
+consistency reads, separate DDL-execution calls), and this round surfaced
+4 further real bugs, all fixed: Cloud Armor's missing `setLabels` endpoint,
+a GKE provider-plugin panic caused by an incomplete `Cluster`/`NodeConfig`
+JSON shape (fixed by populating the substructures real GKE always
+returns), a missing `instanceGroupManagers` endpoint that broke the GKE
+provider's post-apply consistency check, and a missing Spanner database
+DDL endpoint. Final `terraform apply` → `terraform destroy` cycle: 9/9
+resources created and destroyed cleanly, zero errors.

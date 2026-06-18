@@ -8,6 +8,7 @@
 package loadbalancing
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,6 +17,15 @@ import (
 
 	"github.com/cesar/gcp-emulator/internal/server"
 )
+
+// fakeFingerprint produces a syntactically valid base64 fingerprint, same
+// approach as compute.go's helper of the same name (duplicated here per
+// this package's existing convention of not importing the compute
+// package). Real clients — gcloud in particular — decode fingerprint
+// fields as base64 and crash with "Incorrect padding" on anything else.
+func fakeFingerprint(seed string) string {
+	return base64.StdEncoding.EncodeToString([]byte(seed))
+}
 
 const bucketSecurityPolicies = "loadbalancing.securityPolicies"
 
@@ -76,7 +86,7 @@ func (s *Service) insertSecurityPolicy(w http.ResponseWriter, r *http.Request) {
 		Description:       body.Description,
 		Type:              orDefault(body.Type, "CLOUD_ARMOR"),
 		Rules:             body.Rules,
-		Fingerprint:       fmt.Sprintf("fp-%d", time.Now().UnixNano()),
+		Fingerprint:       fakeFingerprint(fmt.Sprintf("%s-%d", body.Name, time.Now().UnixNano())),
 		CreationTimestamp: time.Now().UTC().Format(time.RFC3339),
 		SelfLink:          selfLink(project, "securityPolicies", body.Name),
 	}
@@ -123,6 +133,35 @@ func (s *Service) deleteSecurityPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op := s.ops.Done("delete", selfLink(project, "securityPolicies", name), opsCollection(r, project))
+	server.WriteJSON(w, 200, op)
+}
+
+// setSecurityPolicyLabels handles the setLabels action that Terraform's
+// google_compute_security_policy resource always calls after create/update
+// to apply effective_labels/terraform_labels. This emulator doesn't track
+// labels on security policies, so this is a no-op that just refreshes the
+// fingerprint (real setLabels calls require a matching labelFingerprint and
+// bump it on success) and returns a DONE operation — enough to satisfy the
+// provider without modeling label storage.
+func (s *Service) setSecurityPolicyLabels(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	name := r.PathValue("securityPolicy")
+	var sp SecurityPolicy
+	found, err := s.db.Get(bucketSecurityPolicies, name, &sp)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "security policy not found")
+		return
+	}
+	sp.Fingerprint = fakeFingerprint(fmt.Sprintf("%s-%d", name, time.Now().UnixNano()))
+	if err := s.db.Put(bucketSecurityPolicies, sp.Name, sp); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	op := s.ops.Done("setLabels", sp.SelfLink, opsCollection(r, project))
 	server.WriteJSON(w, 200, op)
 }
 

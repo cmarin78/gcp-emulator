@@ -130,6 +130,18 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /compute/v1/projects/{project}/regions/{region}", s.getRegion)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/machineTypes", s.listMachineTypes)
 
+	// instanceGroupManagers: not modeled (this emulator has no real managed
+	// instance group support), but the Terraform google provider's GKE
+	// resource looks these up by filter when reading a cluster's node
+	// pools (to resolve instance group / node count info from the
+	// gke-*-default-pool naming convention). Without a route here, the
+	// shared mux's catch-all 404 returns plain text, which isn't valid
+	// JSON — that breaks the provider's response decoding further up the
+	// call chain. Always answering with an empty list is enough: a zero-
+	// match filtered list is a completely normal, valid response.
+	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/instanceGroupManagers", s.listInstanceGroupManagers)
+	mux.HandleFunc("GET /compute/v1/projects/{project}/aggregated/instanceGroupManagers", s.listInstanceGroupManagers)
+
 	mux.HandleFunc("POST /compute/v1/projects/{project}/zones/{zone}/instances", s.insertInstance)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/instances", s.listInstances)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/instances/{instance}", s.getInstance)
@@ -226,6 +238,17 @@ func (s *Service) listMachineTypes(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]string{"name": mt, "zone": zone})
 	}
 	server.WriteJSON(w, 200, map[string]any{"kind": "compute#machineTypeList", "items": items})
+}
+
+// listInstanceGroupManagers always returns an empty list. This emulator
+// doesn't model managed instance groups at all, but the Terraform google
+// provider's GKE cluster resource queries this collection (filtered by the
+// gke-*-default-pool naming convention) while reading back a cluster's node
+// pools. A zero-match filtered list is a completely normal, valid real-API
+// response, so returning one here is enough to satisfy the provider without
+// implementing real instance group support.
+func (s *Service) listInstanceGroupManagers(w http.ResponseWriter, r *http.Request) {
+	server.WriteJSON(w, 200, map[string]any{"kind": "compute#instanceGroupManagerList", "items": []any{}})
 }
 
 func instanceKey(zone, name string) string { return zone + "/" + name }

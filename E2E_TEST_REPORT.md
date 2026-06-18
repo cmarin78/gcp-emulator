@@ -210,3 +210,129 @@ have shipped a crashing binary.
 Stopped the test emulator process and removed all ephemeral artifacts:
 `bin\emulator.exe`, `data\phase8test.db`, `phase8_out.log`,
 `phase8_err.log`, `phase8_pid.txt`. No leftover test artifacts remain.
+
+## Annex: Phase 8 round 2 — real gcloud/Terraform clients
+
+Date: 2026-06-18
+Environment: ephemeral binary (`bin\emulator.exe`, port 8444, isolated test
+DB `data\phase8tf.db`), exercised with the **real** `hashicorp/google` v7.37.0
+Terraform provider (not direct HTTP calls like the round-1 smoke test) via a
+`tmp-e2e/tf/main.tf` config covering 9 resources: network, router, NAT,
+route, security policy, Memorystore (Redis) instance, Spanner instance,
+Spanner database, and a GKE cluster.
+
+### Summary
+
+This round used a real client (Terraform's provider binary, which itself
+wraps the real `google-api-go-client`/gRPC-style request shapes) instead of
+hand-built HTTP calls, and it surfaced 4 real bugs that the round-1
+direct-HTTP smoke test could not have caught — three were in code paths that
+only a real client triggers automatically (provider-side label
+reconciliation, post-create consistency reads, and follow-up DDL calls).
+All 4 were found and fixed; the final `terraform apply` / `terraform
+destroy` cycle completed cleanly with 9/9 resources created and 9/9
+destroyed, zero errors.
+
+| Service | Resource | Result |
+|---|---|---|
+| Compute networking | network, router, NAT, route | OK |
+| Cloud Armor | security policy | OK (after fix #1) |
+| Memorystore | Redis instance | OK |
+| Cloud Spanner | instance, database (DDL) | OK (after fix #4) |
+| GKE | cluster | OK (after fixes #2, #3) |
+
+### Bugs found and fixed
+
+#### 1. Cloud Armor: missing `setLabels` endpoint (404)
+**Symptom:** `terraform apply` failed creating `google_compute_security_policy`
+with a 404. **Cause:** Terraform's provider always issues a follow-up
+`POST .../securityPolicies/{name}/setLabels` after create/update to apply
+`effective_labels`/`terraform_labels` — a call a hand-written HTTP smoke test
+would never think to make. This route didn't exist in
+`loadbalancing.go`. **Fix:** added the route plus a no-op
+`setSecurityPolicyLabels` handler in `securitypolicy.go` that refreshes the
+fingerprint and returns a `DONE` operation.
+
+#### 2. GKE: provider plugin panic on cluster create/read
+**Symptom:** the Terraform provider process crashed with
+`panic: runtime error: invalid memory address or nil pointer dereference`
+inside `resourceContainerClusterRead`/`Create`. Because all Terraform
+resources share one provider plugin process, this single panic also
+corrupted concurrently in-flight operations for other resources in the same
+apply (initially misread as a Spanner bug — see bug #4 below for why that
+hypothesis was wrong). **Cause:** the emulator's `Cluster`/`NodeConfig`
+JSON shape was missing many substructures the real GKE API always
+populates (`nodePools` with an auto-created default pool, `masterAuth`,
+`addonsConfig`, `ipAllocationPolicy`, `legacyAbac`, `releaseChannel`,
+`shieldedNodes`, `workloadIdentityConfig`, `networkConfig`, and per-node
+`workloadMetadataConfig`/`shieldedInstanceConfig`), and the provider's Go
+struct deref code assumes they're present. The exact single field
+responsible for the panic could not be pinpointed from source (GitHub
+fetches of the ~2,300-line provider source file were silently truncated by
+the fetch tool's size cap before reaching the relevant function bodies, and
+web search turned up no matching issue reports), so the fix was made
+empirically: populate every one of these substructures with sensible
+defaults in `createCluster`. **Fix verified:** rebuilt and re-tested; the
+panic is gone.
+
+#### 3. GKE: missing `instanceGroupManagers` endpoint (404) breaking apply consistency
+**Symptom:** once bug #2 was fixed, a new error appeared:
+`Error: Provider produced inconsistent result after apply ... Root object
+was present, but now absent`. **Cause:** the default-pool NodePool added
+while fixing bug #2 included an `instanceGroupUrls` field, which caused the
+provider to make a legitimate follow-up Compute Engine call,
+`GET /compute/v1/projects/{project}/zones/{zone}/instanceGroupManagers`,
+to resolve node-pool instance group state. This endpoint didn't exist
+anywhere in `compute.go`, so the shared mux's catch-all handler returned a
+plain-text 404 instead of valid JSON, which broke the provider's
+post-apply consistency check. **Fix:** added
+`GET /compute/v1/projects/{project}/zones/{zone}/instanceGroupManagers`
+(and the `aggregated` variant) returning an empty
+`compute#instanceGroupManagerList` — a real, valid "zero matches" response,
+since this emulator doesn't model managed instance groups.
+
+#### 4. Cloud Spanner: missing database DDL endpoint (404)
+**Symptom:** `terraform apply` failed creating `google_spanner_database`
+with `googleapi: got HTTP response code 404 with body: 404 page not found`
+on the DDL step. **Cause:** real Spanner only accepts a database's initial
+schema through a separate `PATCH .../databases/{database}/ddl` call after
+`CreateDatabase` — Terraform's provider always makes this follow-up call,
+but `spanner.go` never registered the route. This was originally
+misdiagnosed (in an earlier re-test) as collateral damage from the GKE
+panic (bug #2), since both failures appeared in the same apply run; a
+clean re-test after fixing bug #2 proved Spanner had its own, fully
+independent bug. **Fix:** added the route and an `updateDatabaseDdl`
+handler that appends the incoming statements to the database's
+`ExtraStatements` and returns a `DONE` operation — no real DDL parsing or
+execution, consistent with this package's existing "shape-compatible, not
+behavior-complete" approach.
+
+### Test harness note (not an emulator bug)
+
+The first `terraform destroy` attempt failed with
+`Error: Cannot destroy cluster because deletion_protection is set to true`
+(and the equivalent for the Spanner database). This is the Terraform
+google provider's own client-side safety guard — it defaults
+`deletion_protection`/`deletion_policy` to a protective value for
+`google_container_cluster` and `google_spanner_database`, requiring the
+`.tf` config to explicitly opt out. Same behavior occurs against real GCP.
+Added `deletion_protection = false` and `deletion_policy = "ABANDON"` to
+the test config's GKE/Spanner resources, then re-ran a clean
+`apply` → `destroy` cycle from scratch (fresh DB, fresh Terraform state)
+to confirm both completed with zero errors.
+
+### Files modified this round
+
+- `internal/services/loadbalancing/loadbalancing.go` (setLabels route)
+- `internal/services/loadbalancing/securitypolicy.go` (setLabels handler)
+- `internal/services/gke/gke.go` (expanded Cluster/NodeConfig/NodePool shape)
+- `internal/services/compute/compute.go` (instanceGroupManagers endpoint)
+- `internal/services/spanner/spanner.go` (database DDL endpoint)
+
+### Verification of cleanup
+
+Stopped the test emulator process and removed all ephemeral artifacts:
+`bin\emulator.exe`, `data\phase8tf.db`, `phase8tf_out.log`,
+`phase8tf_err.log`, `phase8tf_pid.txt`, and the entire `tmp-e2e\tf\`
+directory (including `.terraform/`, `.terraform.lock.hcl`, Terraform state
+files, and apply/destroy logs). No leftover test artifacts remain.

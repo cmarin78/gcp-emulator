@@ -71,14 +71,25 @@ func New(db *storage.DB) *Service {
 	return &Service{db: db}
 }
 
-// Register mounts the Cloud Build routes, following the real
-// cloudbuild.googleapis.com/v1 paths (legacy, project-scoped — no location
-// segment, matching how most existing Terraform/gcloud usage calls it).
+// Register mounts the Cloud Build routes. The real cloudbuild.googleapis.com/v1
+// API exposes both a legacy project-scoped form (no location segment) and the
+// current regional form (`.../locations/{location}/builds`, normally
+// "global"); real `gcloud builds submit` always calls the regional form, so
+// both are registered here. The regional `operations/{operation}` polling
+// endpoint is intentionally NOT registered here: it's the exact same path
+// pattern already owned by artifactregistry.go on the shared `/v1/*` mux, and
+// its generic handler works fine for any operation name shaped like
+// `projects/{project}/locations/{location}/operations/{operation}` — which is
+// the format produced below for the regional Cloud Build operations.
 func (s *Service) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/projects/{project}/builds", s.createBuild)
+	mux.HandleFunc("POST /v1/projects/{project}/builds", s.createBuildLegacy)
 	mux.HandleFunc("GET /v1/projects/{project}/builds", s.listBuilds)
 	mux.HandleFunc("GET /v1/projects/{project}/builds/{build}", s.getBuild)
 	mux.HandleFunc("GET /v1/projects/{project}/operations/{operation}", s.getOperation)
+
+	mux.HandleFunc("POST /v1/projects/{project}/locations/{location}/builds", s.createBuildRegional)
+	mux.HandleFunc("GET /v1/projects/{project}/locations/{location}/builds", s.listBuildsRegional)
+	mux.HandleFunc("GET /v1/projects/{project}/locations/{location}/builds/{build}", s.getBuildRegional)
 }
 
 func buildKey(project, id string) string {
@@ -89,19 +100,30 @@ func operationName(id string) string {
 	return fmt.Sprintf("operations/build-%s", id)
 }
 
+// regionalOperationName matches the format artifactregistry.go's shared
+// getOperation handler expects: projects/{p}/locations/{l}/operations/{op}.
+func regionalOperationName(project, location, id string) string {
+	return fmt.Sprintf("projects/%s/locations/%s/operations/build-%s", project, location, id)
+}
+
 func (s *Service) nextID() string {
 	s.seq++
 	return fmt.Sprintf("%d", s.seq)
 }
 
-func (s *Service) createBuild(w http.ResponseWriter, r *http.Request) {
-	project := r.PathValue("project")
-	var body struct {
-		Steps      []BuildStep `json:"steps"`
-		Images     []string    `json:"images"`
-		Tags       []string    `json:"tags"`
-		LogsBucket string      `json:"logsBucket"`
-	}
+type createBuildBody struct {
+	Steps      []BuildStep `json:"steps"`
+	Images     []string    `json:"images"`
+	Tags       []string    `json:"tags"`
+	LogsBucket string      `json:"logsBucket"`
+}
+
+// createBuild is the shared implementation behind both the legacy and
+// regional create endpoints. opName builds the Operation's Name field in
+// whichever shape that route needs (legacy: "operations/build-{id}",
+// regional: "projects/{p}/locations/{l}/operations/build-{id}").
+func (s *Service) createBuild(w http.ResponseWriter, r *http.Request, project string, opName func(id string) string) {
+	var body createBuildBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
 		return
@@ -131,12 +153,23 @@ func (s *Service) createBuild(w http.ResponseWriter, r *http.Request) {
 	respBytes, _ := json.Marshal(b)
 	metaBytes, _ := json.Marshal(buildOperationMetadata{Build: b})
 	op := Operation{
-		Name:     operationName(id),
+		Name:     opName(id),
 		Done:     true,
 		Metadata: metaBytes,
 		Response: respBytes,
 	}
 	server.WriteJSON(w, 200, op)
+}
+
+func (s *Service) createBuildLegacy(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	s.createBuild(w, r, project, operationName)
+}
+
+func (s *Service) createBuildRegional(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	location := r.PathValue("location")
+	s.createBuild(w, r, project, func(id string) string { return regionalOperationName(project, location, id) })
 }
 
 func (s *Service) listBuilds(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +186,13 @@ func (s *Service) listBuilds(w http.ResponseWriter, r *http.Request) {
 	server.WriteJSON(w, 200, map[string]any{"builds": builds})
 }
 
+// listBuildsRegional shares storage with the legacy listing — Cloud Build
+// builds aren't actually partitioned by location in this emulator (or in
+// most real-world usage, which sticks to "global").
+func (s *Service) listBuildsRegional(w http.ResponseWriter, r *http.Request) {
+	s.listBuilds(w, r)
+}
+
 func (s *Service) getBuild(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	id := r.PathValue("build")
@@ -167,6 +207,12 @@ func (s *Service) getBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	server.WriteJSON(w, 200, b)
+}
+
+// getBuildRegional shares storage with the legacy getter — see
+// listBuildsRegional.
+func (s *Service) getBuildRegional(w http.ResponseWriter, r *http.Request) {
+	s.getBuild(w, r)
 }
 
 // getOperation always reports done=true: this emulator doesn't model

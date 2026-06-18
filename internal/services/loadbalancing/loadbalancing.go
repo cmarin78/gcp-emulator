@@ -162,6 +162,7 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/securityPolicies", s.listSecurityPolicies)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/securityPolicies/{securityPolicy}", s.getSecurityPolicy)
 	mux.HandleFunc("DELETE /compute/v1/projects/{project}/global/securityPolicies/{securityPolicy}", s.deleteSecurityPolicy)
+	mux.HandleFunc("POST /compute/v1/projects/{project}/global/securityPolicies/{securityPolicy}/setLabels", s.setSecurityPolicyLabels)
 }
 
 func selfLink(project, kind, name string) string {
