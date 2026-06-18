@@ -102,6 +102,23 @@ func regionPath(project, region string) string {
 	return fmt.Sprintf("projects/%s/regions/%s", project, region)
 }
 
+// opsBase devuelve la base absoluta (esquema+host+"/compute/v1") a partir
+// del propio request, para construir el selfLink de una Operation. gcloud
+// resuelve el selfLink de una Operation con
+// resources.Parse(selfLink) SIN especificar collection (lo hace así p. ej.
+// en compute/instances/stop.py y start.py), lo que requiere que la URL sea
+// absoluta para poder matchear contra la API registrada; un selfLink
+// relativo (sin esquema/host) hace que ese parseo falle con
+// "unknown collection for [...]". Los selfLink de "insert" no se vuelven a
+// parsear de esa forma, así que el bug solo se manifestaba en stop/start.
+func opsBase(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s/compute/v1", scheme, r.Host)
+}
+
 // normalizeGlobalRef acepta tanto un nombre corto ("default") como un
 // selfLink/URL ya completo, y devuelve siempre una referencia completa
 // relativa al recurso global indicado (p. ej. "networks", "images").
@@ -151,7 +168,7 @@ func (s *Service) insertNetwork(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	op := s.ops.Done("insert", n.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/global/operations", project))
+	op := s.ops.Done("insert", n.SelfLink, fmt.Sprintf("%s/projects/%s/global/operations", opsBase(r), project))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -190,7 +207,7 @@ func (s *Service) deleteNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op := s.ops.Done("delete", fmt.Sprintf("/compute/v1/projects/%s/global/networks/%s", project, name),
-		fmt.Sprintf("/compute/v1/projects/%s/global/operations", project))
+		fmt.Sprintf("%s/projects/%s/global/operations", opsBase(r), project))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -223,7 +240,7 @@ func (s *Service) insertSubnetwork(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	op := s.ops.DoneRegional("insert", sn.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/regions/%s/operations", project, region), regionPath(project, region))
+	op := s.ops.DoneRegional("insert", sn.SelfLink, fmt.Sprintf("%s/projects/%s/regions/%s/operations", opsBase(r), project, region), regionPath(project, region))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -265,7 +282,7 @@ func (s *Service) deleteSubnetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op := s.ops.DoneRegional("delete", fmt.Sprintf("/compute/v1/projects/%s/regions/%s/subnetworks/%s", project, region, name),
-		fmt.Sprintf("/compute/v1/projects/%s/regions/%s/operations", project, region), regionPath(project, region))
+		fmt.Sprintf("%s/projects/%s/regions/%s/operations", opsBase(r), project, region), regionPath(project, region))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -304,7 +321,7 @@ func (s *Service) insertFirewall(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	op := s.ops.Done("insert", fw.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/global/operations", project))
+	op := s.ops.Done("insert", fw.SelfLink, fmt.Sprintf("%s/projects/%s/global/operations", opsBase(r), project))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -343,7 +360,7 @@ func (s *Service) deleteFirewall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op := s.ops.Done("delete", fmt.Sprintf("/compute/v1/projects/%s/global/firewalls/%s", project, name),
-		fmt.Sprintf("/compute/v1/projects/%s/global/operations", project))
+		fmt.Sprintf("%s/projects/%s/global/operations", opsBase(r), project))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -424,7 +441,7 @@ func (s *Service) insertDisk(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	op := s.ops.DoneZonal("insert", d.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone), zonePath(project, zone))
+	op := s.ops.DoneZonal("insert", d.SelfLink, fmt.Sprintf("%s/projects/%s/zones/%s/operations", opsBase(r), project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -466,6 +483,6 @@ func (s *Service) deleteDisk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op := s.ops.DoneZonal("delete", fmt.Sprintf("/compute/v1/projects/%s/zones/%s/disks/%s", project, zone, name),
-		fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone), zonePath(project, zone))
+		fmt.Sprintf("%s/projects/%s/zones/%s/operations", opsBase(r), project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }

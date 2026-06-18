@@ -5,6 +5,7 @@
 package compute
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,14 @@ import (
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
+
+// fakeFingerprint genera un fingerprint con forma válida para los clientes
+// reales: en la API real estos campos son bytes (base64 en JSON). Las
+// librerías generadas (apitools, usada por gcloud) intentan decodificar
+// base64 ese campo y fallan con "Incorrect padding" si no lo es.
+func fakeFingerprint(seed string) string {
+	return base64.StdEncoding.EncodeToString([]byte(seed))
+}
 
 const bucketInstances = "compute.instances"
 
@@ -131,6 +140,13 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/operations/{operation}", s.getOperation)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/regions/{region}/operations/{operation}", s.getOperation)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/operations/{operation}", s.getOperation)
+	// El método "wait" (POST .../operations/{operation}/wait) es lo que usa
+	// gcloud para esperar a que termine una operación (p. ej. tras
+	// instances.stop/start); como el emulador resuelve todo de forma
+	// síncrona, basta con devolver la misma operación ya DONE.
+	mux.HandleFunc("POST /compute/v1/projects/{project}/zones/{zone}/operations/{operation}/wait", s.getOperation)
+	mux.HandleFunc("POST /compute/v1/projects/{project}/regions/{region}/operations/{operation}/wait", s.getOperation)
+	mux.HandleFunc("POST /compute/v1/projects/{project}/global/operations/{operation}/wait", s.getOperation)
 
 	// Fase 1: networks, subnetworks, firewalls, images, disks.
 	mux.HandleFunc("POST /compute/v1/projects/{project}/global/networks", s.insertNetwork)
@@ -232,7 +248,7 @@ func (s *Service) insertInstance(w http.ResponseWriter, r *http.Request) {
 	}
 	ifaces := s.resolveNetworkInterfaces(project, body.NetworkInterfaces)
 
-	meta := Metadata{Kind: "compute#metadata", Fingerprint: fmt.Sprintf("meta-%d", s.seq)}
+	meta := Metadata{Kind: "compute#metadata", Fingerprint: fakeFingerprint(fmt.Sprintf("meta-%d", s.seq))}
 	if body.Metadata != nil {
 		meta.Items = body.Metadata.Items
 	}
@@ -250,16 +266,16 @@ func (s *Service) insertInstance(w http.ResponseWriter, r *http.Request) {
 		Disks:             disks,
 		NetworkInterfaces: ifaces,
 		Metadata:          meta,
-		Tags:              Tags{Fingerprint: fmt.Sprintf("tags-%d", s.seq)},
+		Tags:              Tags{Fingerprint: fakeFingerprint(fmt.Sprintf("tags-%d", s.seq))},
 		Scheduling:        Scheduling{OnHostMaintenance: "MIGRATE", AutomaticRestart: &autoRestart},
 		CPUPlatform:       "Intel Broadwell",
-		LabelFingerprint:  fmt.Sprintf("labels-%d", s.seq),
+		LabelFingerprint:  fakeFingerprint(fmt.Sprintf("labels-%d", s.seq)),
 	}
 	if err := s.db.Put(bucketInstances, instanceKey(zone, inst.Name), inst); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	op := s.ops.DoneZonal("insert", inst.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone), zonePath(project, zone))
+	op := s.ops.DoneZonal("insert", inst.SelfLink, fmt.Sprintf("%s/projects/%s/zones/%s/operations", opsBase(r), project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }
 
@@ -388,11 +404,11 @@ func (s *Service) deleteInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op := s.ops.DoneZonal("delete", fmt.Sprintf("/compute/v1/projects/%s/zones/%s/instances/%s", project, zone, name),
-		fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone), zonePath(project, zone))
+		fmt.Sprintf("%s/projects/%s/zones/%s/operations", opsBase(r), project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }
 
-func (s *Service) setStatus(w http.ResponseWriter, r *http.Request, status string) {
+func (s *Service) setStatus(w http.ResponseWriter, r *http.Request, status, opType string) {
 	project := r.PathValue("project")
 	zone := r.PathValue("zone")
 	name := r.PathValue("instance")
@@ -411,14 +427,20 @@ func (s *Service) setStatus(w http.ResponseWriter, r *http.Request, status strin
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	op := s.ops.DoneZonal("update", inst.SelfLink, fmt.Sprintf("/compute/v1/projects/%s/zones/%s/operations", project, zone), zonePath(project, zone))
+	// gcloud usa el operationType ("start"/"stop") para resolver el poller de
+	// la operación; un valor genérico como "update" no es el que la API real
+	// devuelve para estas acciones y hace que gcloud falle con
+	// "unknown collection" al intentar resolver la operación.
+	op := s.ops.DoneZonal(opType, inst.SelfLink, fmt.Sprintf("%s/projects/%s/zones/%s/operations", opsBase(r), project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }
 
 func (s *Service) stopInstance(w http.ResponseWriter, r *http.Request) {
-	s.setStatus(w, r, "TERMINATED")
+	s.setStatus(w, r, "TERMINATED", "stop")
 }
-func (s *Service) startInstance(w http.ResponseWriter, r *http.Request) { s.setStatus(w, r, "RUNNING") }
+func (s *Service) startInstance(w http.ResponseWriter, r *http.Request) {
+	s.setStatus(w, r, "RUNNING", "start")
+}
 
 func (s *Service) getOperation(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("operation")

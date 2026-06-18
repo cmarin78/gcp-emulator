@@ -69,6 +69,9 @@ func (s *Service) createRepository(w http.ResponseWriter, r *http.Request) {
 	location := r.PathValue("location")
 	repoID := r.URL.Query().Get("repositoryId")
 	if repoID == "" {
+		repoID = r.URL.Query().Get("repository_id")
+	}
+	if repoID == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "repositoryId es requerido")
 		return
 	}

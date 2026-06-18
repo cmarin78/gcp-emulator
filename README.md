@@ -84,6 +84,30 @@ Implemented (functional subset, not exhaustive):
 - **Cloud Monitoring**: alert policies
   (`/v3/projects/{p}/alertPolicies[/{policy}]`, CRUD) and a `timeSeries`
   endpoint that always returns an empty list.
+- **Resource Manager**: projects (`/v3/projects[/{project}]`, create/get/
+  list/delete) returning a `google.longrunning.Operation`, matching
+  `cloudresourcemanager.googleapis.com/v3`.
+- **Cloud Scheduler**: jobs
+  (`/v1/projects/{p}/locations/{l}/jobs[/{job}]`, CRUD) plus manual
+  `:run`/`:pause`/`:resume` actions. No real cron firing — `:run` simulates
+  execution by updating `lastAttemptTime`/`scheduleTime`.
+- **Cloud Tasks**: queues and tasks
+  (`/v2/projects/{p}/locations/{l}/queues[/{queue}[/tasks[/{task}]]]`),
+  with `:pause`/`:resume` on queues. `createTask` enqueues the task but
+  there's no real dispatcher delivering it anywhere.
+- **Cloud DNS**: managed zones and resource record sets
+  (`/dns/v1/projects/{p}/managedZones[/{zone}[/rrsets]]`). Rrsets are
+  mutated atomically via the `changes` resource
+  (additions/deletions), same as the real API and as Terraform's
+  `google_dns_record_set` provider expects; resolved synchronously
+  (`status: done`). No real DNS resolution.
+- **Load Balancing**: global HTTP(S) load balancing resources
+  (`/compute/v1/projects/{p}/global/{healthChecks,backendServices,urlMaps,
+  targetHttpProxies,targetHttpsProxies,forwardingRules}`, CRUD), returning
+  Compute's own `Operation` shape (not the simpler longrunning one) so
+  gcloud's polling/selfLink resolution works the same way it does for
+  networks/instances. No real traffic proxying — shape and resource graph
+  only.
 - **Web console** (`web/console`): minimal UI to view and manage buckets,
   instances, and service accounts.
 - Verified end-to-end with a real `terraform apply`/`destroy` against
@@ -94,9 +118,10 @@ Implemented (functional subset, not exhaustive):
   cleanly, no provider patches needed.
 
 Roadmap / what's next: see [ROADMAP.md](ROADMAP.md) for the full phased
-plan (all six planned phases are now complete; future work would be new,
-unplanned phases). The architecture (`internal/services/<service>`) is
-designed so new services can be added without touching existing ones.
+plan (all seven planned phases are now complete and verified; future work
+would be new, unplanned phases). The architecture
+(`internal/services/<service>`) is designed so new services can be added
+without touching existing ones.
 
 ## Project structure
 
@@ -119,6 +144,12 @@ internal/services/bigquery/         BigQuery emulation (datasets, tables)
 internal/services/kms/              Cloud KMS emulation (keyrings, cryptokeys, cryptoKeyVersions)
 internal/services/logging/          Cloud Logging emulation (project-level sinks)
 internal/services/monitoring/       Cloud Monitoring emulation (alert policies, timeSeries stub)
+internal/services/resourcemanager/  Resource Manager emulation (projects)
+internal/services/cloudscheduler/   Cloud Scheduler emulation (jobs, :run/:pause/:resume)
+internal/services/cloudtasks/       Cloud Tasks emulation (queues, tasks)
+internal/services/clouddns/         Cloud DNS emulation (managedZones, rrsets via changes)
+internal/services/loadbalancing/    Load Balancing emulation (healthChecks, backendServices,
+                                     urlMaps, target proxies, forwardingRules — global only)
 web/console/                static frontend (HTML/CSS/JS, no build step)
 scripts/                    scripts to point the gcloud CLI at the emulator
 data/                       runtime embedded data file (gitignored)

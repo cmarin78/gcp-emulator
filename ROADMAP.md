@@ -127,3 +127,36 @@ resulting occasional `/v1/v1/...` request path centrally in `server.Handler()`.
 4. Phase 4 (Cloud Run / Functions) — more effort, larger API surface. ✅ done.
 5. Phase 5 (data) — the most expensive to implement, best left until the service pattern is well polished. ✅ done.
 6. Phase 6 (observability/governance) — ✅ done.
+
+## Phase 7 — Resource Manager, scheduling, DNS, and load balancing
+
+New, unplanned phase, decided after the full 1-6 plan was completed and
+verified end-to-end with gcloud CLI and Terraform. Ordered by
+dependency/effort: items with no dependencies and low effort first, Load
+Balancing last since it's by far the largest API surface.
+
+| Service | Minimum resources | Depends on | Why | Effort | Status |
+|---|---|---|---|---|---|
+| Resource Manager | `projects` (create/get) | — | Today "project" is an opaque string accepted by every service; this models `google_project` for added realism. Low priority but trivial once started. | S | ✅ |
+| Cloud Scheduler | `jobs` (CRUD), manual `:run` trigger | — | Completes the serverless combo already in place (Pub/Sub, Cloud Functions, Cloud Run); commonly paired with both. | S | ✅ |
+| Cloud Tasks | `queues`, `tasks` (CRUD, create-task only — no real delivery) | — | Same family as Cloud Scheduler; low effort given the Pub/Sub pattern already exists to copy from. | S | ✅ |
+| Cloud DNS | `managedZones`, `resourceRecordSets` (CRUD) | — | Very common in Terraform alongside Compute (`google_dns_managed_zone`, `google_dns_record_set`). | S/M | ✅ |
+| Load Balancing | `backendServices`, `urlMaps`, `targetHttpProxies`/`targetHttpsProxies`, `forwardingRules`, `healthChecks` (all global, simplified — no regional/SSL variants initially) | `compute.networks`, `compute.instances` (already done) | Highest value for realistic Compute architectures, but the largest API surface of any service so far — same family of complexity as `compute.googleapis.com` itself. | L | ✅ |
+
+Cloud Scheduler/Tasks and Cloud DNS don't model real delivery/resolution (no
+actual HTTP calls fired by Scheduler, no actual DNS resolution) — same
+"shape-compatible, not behavior-complete" approach used by Pub/Sub and the
+other async services. Load Balancing reuses Compute's own `Operation` shape
+(`internal/server/operations.go`, not the simpler `google.longrunning.Operation`
+used by the other three) since its resources live under
+`compute.googleapis.com` and gcloud polls/parses operations the same way it
+does for networks/instances; it's similarly shape-only and won't actually
+proxy traffic.
+
+✅ Verified 2026-06-18: built and smoke-tested on a real machine (Go 1.26,
+ephemeral binary/db, see `E2E_TEST_REPORT.md` for the full Phase 7 section).
+All five services — Resource Manager, Cloud Scheduler (`:run`), Cloud Tasks
+(`:pause`), Cloud DNS (zone + change + rrsets), Load Balancing (full chain:
+healthCheck → backendService → urlMap → targetHttpProxy → forwardingRule) —
+worked correctly on first try, zero bugs found. No leftover artifacts
+(`git status --short` clean of binaries/dbs after cleanup).
