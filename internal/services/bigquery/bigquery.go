@@ -127,6 +127,16 @@ func (s *Svc) createDataset(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "invalid", "datasetReference.datasetId es requerido")
 		return
 	}
+	var existingDS Dataset
+	found, err := s.db.Get(bucketDatasets, datasetKey(project, body.DatasetReference.DatasetID), &existingDS)
+	if err != nil {
+		server.WriteError(w, 500, "internal", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "duplicate", "dataset ya existe: "+body.DatasetReference.DatasetID)
+		return
+	}
 	now := fmt.Sprintf("%d", time.Now().UnixMilli())
 	ds := Dataset{
 		Kind: "bigquery#dataset",
@@ -244,6 +254,16 @@ func (s *Svc) createTable(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.TableReference.TableID == "" {
 		server.WriteError(w, 400, "invalid", "tableReference.tableId es requerido")
+		return
+	}
+	var existingTable Table
+	found, err := s.db.Get(bucketTables, tableKey(project, dataset, body.TableReference.TableID), &existingTable)
+	if err != nil {
+		server.WriteError(w, 500, "internal", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "duplicate", "tabla ya existe: "+body.TableReference.TableID)
 		return
 	}
 	now := fmt.Sprintf("%d", time.Now().UnixMilli())

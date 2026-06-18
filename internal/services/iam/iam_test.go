@@ -62,6 +62,33 @@ func TestServiceAccountLifecycle(t *testing.T) {
 	}
 }
 
+// TestDuplicateCreateConflicts asserts that creating a service account or
+// custom role whose client-specified ID already exists returns 409
+// ALREADY_EXISTS instead of silently overwriting.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/serviceAccounts", map[string]any{
+		"accountId": "dup-sa",
+	}, nil)
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/serviceAccounts", map[string]any{
+		"accountId": "dup-sa",
+	}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate service account: want 409, got %d", status)
+	}
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/roles", map[string]any{
+		"roleId": "dupRole",
+	}, nil)
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/roles", map[string]any{
+		"roleId": "dupRole",
+	}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate custom role: want 409, got %d", status)
+	}
+}
+
 // TestProjectIamPolicy covers the getIamPolicy/setIamPolicy action dispatch,
 // which relies on Go's mux capturing a whole path segment and the handler
 // splitting on ":" itself -- a pattern worth covering directly since it's

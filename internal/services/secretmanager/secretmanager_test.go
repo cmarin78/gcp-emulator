@@ -81,3 +81,15 @@ func TestSecretListAndDelete(t *testing.T) {
 		t.Fatalf("get after delete: want 404, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflict asserts that creating a secret whose
+// client-specified secretId already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflict(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/secrets?secretId=dup-secret", nil, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/secrets?secretId=dup-secret", nil, nil)
+	if status != 409 {
+		t.Fatalf("duplicate secret: want 409, got %d", status)
+	}
+}

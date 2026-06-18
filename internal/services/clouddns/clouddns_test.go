@@ -51,6 +51,19 @@ func TestZoneLifecycle(t *testing.T) {
 	}
 }
 
+// TestDuplicateCreateConflict asserts that creating a managed zone whose
+// name already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflict(t *testing.T) {
+	srv := newTestServer(t)
+	body := map[string]string{"name": "dup-zone", "dnsName": "example.com."}
+	testutil.DoJSON(t, "POST", srv.URL+"/dns/v1/projects/proj1/managedZones", body, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/dns/v1/projects/proj1/managedZones", body, nil)
+	if status != 409 {
+		t.Fatalf("duplicate zone: want 409, got %d", status)
+	}
+}
+
 // TestChangeAppliesAdditionsAndDeletions covers the Change-based rrset
 // mutation flow used by the `google_dns_record_set` Terraform resource:
 // additions are applied, and a later change deleting + re-adding the same

@@ -74,6 +74,16 @@ func (s *Service) insertRouter(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name and network are required")
 		return
 	}
+	var existingRouter Router
+	found, err := s.db.Get(bucketRouters, routerKey(region, body.Name), &existingRouter)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "router already exists: "+body.Name)
+		return
+	}
 	rt := Router{
 		ID:                fmt.Sprintf("%d", s.nextSeq()),
 		Name:              body.Name,
@@ -186,6 +196,16 @@ func (s *Service) insertRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" || body.Network == "" || body.DestRange == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name, network and destRange are required")
+		return
+	}
+	var existingRoute Route
+	found, err := s.db.Get(bucketRoutes, routeKey(body.Name), &existingRoute)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "route already exists: "+body.Name)
 		return
 	}
 	rt := Route{

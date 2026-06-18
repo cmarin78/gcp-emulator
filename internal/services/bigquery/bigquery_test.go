@@ -95,3 +95,29 @@ func TestTableLifecycle(t *testing.T) {
 		t.Fatalf("delete table: want 200, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflicts asserts that creating a dataset or table whose
+// client-specified ID already exists returns 409 instead of overwriting.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST", srv.URL+"/bigquery/v2/projects/proj1/datasets", map[string]any{
+		"datasetReference": map[string]string{"datasetId": "ds1"},
+	}, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/bigquery/v2/projects/proj1/datasets", map[string]any{
+		"datasetReference": map[string]string{"datasetId": "ds1"},
+	}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate dataset: want 409, got %d", status)
+	}
+
+	testutil.DoJSON(t, "POST", srv.URL+"/bigquery/v2/projects/proj1/datasets/ds1/tables", map[string]any{
+		"tableReference": map[string]string{"tableId": "my_table"},
+	}, nil)
+	status = testutil.DoJSON(t, "POST", srv.URL+"/bigquery/v2/projects/proj1/datasets/ds1/tables", map[string]any{
+		"tableReference": map[string]string{"tableId": "my_table"},
+	}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate table: want 409, got %d", status)
+	}
+}

@@ -107,9 +107,22 @@ func (s *Svc) createDatabase(w http.ResponseWriter, r *http.Request) {
 		ConcurrencyMode string `json:"concurrencyMode"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	name := dbName(project, databaseID)
+	var existingDB Database
+	found, err := s.db.Get(bucketDatabases, name, &existingDB)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "la base de datos ya existe: "+name)
+		return
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	d := Database{
-		Name:            dbName(project, databaseID),
+		Name:            name,
 		Type:            orDefault(body.Type, "FIRESTORE_NATIVE"),
 		LocationID:      orDefault(body.LocationID, "nam5"),
 		ConcurrencyMode: orDefault(body.ConcurrencyMode, "OPTIMISTIC"),

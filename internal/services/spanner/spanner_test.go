@@ -121,3 +121,25 @@ func TestCreateDatabaseRequiresValidCreateStatement(t *testing.T) {
 		t.Fatalf("invalid createStatement: want 400, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflicts asserts that creating an instance or database
+// whose client-specified name already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/instances", map[string]any{"instanceId": "inst1"}, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/instances", map[string]any{"instanceId": "inst1"}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate instance: want 409, got %d", status)
+	}
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/instances/inst1/databases", map[string]any{
+		"createStatement": "CREATE DATABASE `mydb`",
+	}, nil)
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/instances/inst1/databases", map[string]any{
+		"createStatement": "CREATE DATABASE `mydb`",
+	}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate database: want 409, got %d", status)
+	}
+}

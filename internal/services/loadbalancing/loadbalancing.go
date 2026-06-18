@@ -188,6 +188,16 @@ func (s *Service) insertHealthCheck(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
 		return
 	}
+	var existingHC HealthCheck
+	found, err := s.db.Get(bucketHealthChecks, body.Name, &existingHC)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "health check ya existe: "+body.Name)
+		return
+	}
 	hc := HealthCheck{
 		ID:                fmt.Sprintf("%d", s.nextSeq()),
 		Name:              body.Name,
@@ -264,6 +274,16 @@ func (s *Service) insertBackendService(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
+		return
+	}
+	var existingBS BackendService
+	found, err := s.db.Get(bucketBackendServices, body.Name, &existingBS)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "backend service ya existe: "+body.Name)
 		return
 	}
 	bs := BackendService{
@@ -343,6 +363,16 @@ func (s *Service) insertURLMap(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
 		return
 	}
+	var existingUM URLMap
+	found, err := s.db.Get(bucketURLMaps, body.Name, &existingUM)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "url map ya existe: "+body.Name)
+		return
+	}
 	um := URLMap{
 		ID:                fmt.Sprintf("%d", s.nextSeq()),
 		Name:              body.Name,
@@ -414,6 +444,16 @@ func (s *Service) insertTargetHTTPProxy(w http.ResponseWriter, r *http.Request) 
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
 		return
 	}
+	var existingTP TargetHTTPProxy
+	found, err := s.db.Get(bucketTargetHTTP, body.Name, &existingTP)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "target http proxy ya existe: "+body.Name)
+		return
+	}
 	tp := TargetHTTPProxy{
 		ID:                fmt.Sprintf("%d", s.nextSeq()),
 		Name:              body.Name,
@@ -482,6 +522,16 @@ func (s *Service) insertTargetHTTPSProxy(w http.ResponseWriter, r *http.Request)
 	}
 	if body.Name == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
+		return
+	}
+	var existingTPS TargetHTTPSProxy
+	found, err := s.db.Get(bucketTargetHTTPS, body.Name, &existingTPS)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "target https proxy ya existe: "+body.Name)
 		return
 	}
 	tp := TargetHTTPSProxy{
@@ -556,6 +606,16 @@ func (s *Service) insertForwardingRule(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
+		return
+	}
+	var existingFR ForwardingRule
+	found, err := s.db.Get(bucketForwardingRules, body.Name, &existingFR)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "forwarding rule ya existe: "+body.Name)
 		return
 	}
 	ip := body.IPAddress

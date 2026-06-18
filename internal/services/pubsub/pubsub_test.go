@@ -97,3 +97,25 @@ func TestTopicAndSubscriptionDelete(t *testing.T) {
 		t.Fatalf("get deleted topic: want 404, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflicts asserts that creating a topic or subscription
+// whose client-specified name already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+
+	testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/proj1/topics/dup-topic", nil, nil)
+	status := testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/proj1/topics/dup-topic", nil, nil)
+	if status != 409 {
+		t.Fatalf("duplicate topic: want 409, got %d", status)
+	}
+
+	testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/proj1/subscriptions/dup-sub", map[string]any{
+		"topic": "projects/proj1/topics/dup-topic",
+	}, nil)
+	status = testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/proj1/subscriptions/dup-sub", map[string]any{
+		"topic": "projects/proj1/topics/dup-topic",
+	}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate subscription: want 409, got %d", status)
+	}
+}

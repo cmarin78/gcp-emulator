@@ -102,3 +102,29 @@ func TestNodePoolLifecycle(t *testing.T) {
 		t.Fatalf("delete node pool: status=%d op=%+v", status, deleteOp)
 	}
 }
+
+// TestDuplicateCreateConflicts asserts that creating a cluster or node pool
+// whose client-specified name already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/clusters", map[string]any{
+		"cluster": map[string]any{"name": "my-cluster"},
+	}, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/clusters", map[string]any{
+		"cluster": map[string]any{"name": "my-cluster"},
+	}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate cluster: want 409, got %d", status)
+	}
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/clusters/my-cluster/nodePools", map[string]any{
+		"nodePool": map[string]any{"name": "pool-2"},
+	}, nil)
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/clusters/my-cluster/nodePools", map[string]any{
+		"nodePool": map[string]any{"name": "pool-2"},
+	}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate node pool: want 409, got %d", status)
+	}
+}

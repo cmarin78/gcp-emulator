@@ -133,12 +133,23 @@ func (s *Service) createServiceAccount(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "accountId es requerido")
 		return
 	}
+	email := fmt.Sprintf("%s@%s.iam.gserviceaccount.com", body.AccountID, project)
+	var existing ServiceAccount
+	found, err := s.db.Get(bucketServiceAccounts, email, &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "service account ya existe: "+email)
+		return
+	}
 	s.seq++
 	sa := ServiceAccount{
 		Name:        fmt.Sprintf("projects/%s/serviceAccounts/%s@%s.iam.gserviceaccount.com", project, body.AccountID, project),
 		ProjectID:   project,
 		UniqueID:    fmt.Sprintf("%d%d", time.Now().Unix(), s.seq),
-		Email:       fmt.Sprintf("%s@%s.iam.gserviceaccount.com", body.AccountID, project),
+		Email:       email,
 		DisplayName: body.ServiceAccount.DisplayName,
 		Description: body.ServiceAccount.Description,
 	}
@@ -279,6 +290,16 @@ func (s *Service) createCustomRole(w http.ResponseWriter, r *http.Request) {
 	}
 	role := body.Role
 	role.Name = customRoleName(project, body.RoleID)
+	var existingRole Role
+	found, err := s.db.Get(bucketCustomRoles, role.Name, &existingRole)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "custom role ya existe: "+role.Name)
+		return
+	}
 	if role.Stage == "" {
 		role.Stage = "GA"
 	}

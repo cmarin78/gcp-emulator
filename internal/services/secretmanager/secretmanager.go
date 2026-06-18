@@ -88,8 +88,19 @@ func (s *Service) createSecret(w http.ResponseWriter, r *http.Request) {
 		Labels map[string]string `json:"labels"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	name := secretName(project, secretID)
+	var existing Secret
+	found, err := s.db.Get(bucketSecrets, name, &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "secret ya existe: "+name)
+		return
+	}
 	sec := Secret{
-		Name:       secretName(project, secretID),
+		Name:       name,
 		Labels:     body.Labels,
 		CreateTime: time.Now().UTC().Format(time.RFC3339),
 	}

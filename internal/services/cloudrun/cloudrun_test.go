@@ -81,3 +81,19 @@ func TestCreateRequiresContainerImage(t *testing.T) {
 		t.Fatalf("create without container image: want 400, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflict asserts that creating a service whose
+// serviceId already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflict(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST",
+		srv.URL+"/v2/projects/proj1/locations/us-central1/services?serviceId=my-svc",
+		validBody(), nil)
+
+	status := testutil.DoJSON(t, "POST",
+		srv.URL+"/v2/projects/proj1/locations/us-central1/services?serviceId=my-svc",
+		validBody(), nil)
+	if status != 409 {
+		t.Fatalf("duplicate service: want 409, got %d", status)
+	}
+}

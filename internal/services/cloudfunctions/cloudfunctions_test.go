@@ -77,3 +77,19 @@ func TestCreateRequiresRuntimeAndEntryPoint(t *testing.T) {
 		t.Fatalf("create without runtime/entryPoint: want 400, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflict asserts that creating a function whose
+// functionId already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflict(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST",
+		srv.URL+"/v2/projects/proj1/locations/us-central1/functions?functionId=my-fn",
+		validBody(), nil)
+
+	status := testutil.DoJSON(t, "POST",
+		srv.URL+"/v2/projects/proj1/locations/us-central1/functions?functionId=my-fn",
+		validBody(), nil)
+	if status != 409 {
+		t.Fatalf("duplicate function: want 409, got %d", status)
+	}
+}

@@ -110,3 +110,28 @@ func TestDatabaseAndUserLifecycle(t *testing.T) {
 		t.Fatalf("delete user: want 200, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflicts asserts that creating an instance, database,
+// or user whose client-specified name already exists returns 409
+// ALREADY_EXISTS instead of silently overwriting the existing resource.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST", srv.URL+"/sql/v1beta4/projects/proj1/instances", map[string]any{"name": "inst1"}, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/sql/v1beta4/projects/proj1/instances", map[string]any{"name": "inst1"}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate instance: want 409, got %d", status)
+	}
+
+	testutil.DoJSON(t, "POST", srv.URL+"/sql/v1beta4/projects/proj1/instances/inst1/databases", map[string]string{"name": "mydb"}, nil)
+	status = testutil.DoJSON(t, "POST", srv.URL+"/sql/v1beta4/projects/proj1/instances/inst1/databases", map[string]string{"name": "mydb"}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate database: want 409, got %d", status)
+	}
+
+	testutil.DoJSON(t, "POST", srv.URL+"/sql/v1beta4/projects/proj1/instances/inst1/users", map[string]string{"name": "appuser", "password": "secret"}, nil)
+	status = testutil.DoJSON(t, "POST", srv.URL+"/sql/v1beta4/projects/proj1/instances/inst1/users", map[string]string{"name": "appuser", "password": "secret"}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate user: want 409, got %d", status)
+	}
+}

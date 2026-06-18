@@ -272,6 +272,16 @@ func (s *Service) insertInstance(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
 		return
 	}
+	var existingInst Instance
+	found, err := s.db.Get(bucketInstances, instanceKey(zone, body.Name), &existingInst)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "instancia ya existe: "+body.Name)
+		return
+	}
 	s.seq++
 	now := time.Now().UTC().Format(time.RFC3339)
 

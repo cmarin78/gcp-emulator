@@ -101,3 +101,28 @@ func TestTaskLifecycle(t *testing.T) {
 		t.Fatalf("delete task: want 200, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflicts asserts that creating a queue whose name
+// already exists, or a task with an explicit client-specified name that
+// already exists, returns 409 ALREADY_EXISTS instead of silently overwriting.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+
+	queueBody := map[string]string{"name": "projects/proj1/locations/us-central1/queues/dup-queue"}
+	testutil.DoJSON(t, "POST", srv.URL+"/v2/projects/proj1/locations/us-central1/queues", queueBody, nil)
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v2/projects/proj1/locations/us-central1/queues", queueBody, nil)
+	if status != 409 {
+		t.Fatalf("duplicate queue: want 409, got %d", status)
+	}
+
+	taskBody := map[string]any{
+		"task": map[string]any{
+			"name": "projects/proj1/locations/us-central1/queues/dup-queue/tasks/dup-task",
+		},
+	}
+	testutil.DoJSON(t, "POST", srv.URL+"/v2/projects/proj1/locations/us-central1/queues/dup-queue/tasks", taskBody, nil)
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v2/projects/proj1/locations/us-central1/queues/dup-queue/tasks", taskBody, nil)
+	if status != 409 {
+		t.Fatalf("duplicate task: want 409, got %d", status)
+	}
+}

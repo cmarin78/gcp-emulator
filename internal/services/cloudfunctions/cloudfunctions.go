@@ -128,8 +128,18 @@ func (s *Svc) createFunction(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "buildConfig.runtime y buildConfig.entryPoint son requeridos")
 		return
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
 	name := functionName(project, location, functionID)
+	var existingFn Function
+	found, err := s.db.Get(bucketFunctions, name, &existingFn)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "función ya existe: "+name)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
 	svcConfig := body.ServiceConfig
 	svcConfig.Service = fmt.Sprintf("projects/%s/locations/%s/services/%s", project, location, functionID)
 	svcConfig.URI = fakeURI(functionID, location)

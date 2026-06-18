@@ -78,3 +78,16 @@ func TestJobActionsRunPauseResume(t *testing.T) {
 		t.Fatalf("resume: status=%d job=%+v", status, resumed)
 	}
 }
+
+// TestDuplicateCreateConflict asserts that creating a job whose
+// client-specified name already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflict(t *testing.T) {
+	srv := newTestServer(t)
+	body := map[string]any{"name": "projects/proj1/locations/us-central1/jobs/dup-job"}
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/jobs", body, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/jobs", body, nil)
+	if status != 409 {
+		t.Fatalf("duplicate job: want 409, got %d", status)
+	}
+}

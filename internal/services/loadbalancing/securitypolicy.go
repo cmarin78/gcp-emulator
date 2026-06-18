@@ -80,6 +80,16 @@ func (s *Service) insertSecurityPolicy(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name is required")
 		return
 	}
+	var existingSP SecurityPolicy
+	found, err := s.db.Get(bucketSecurityPolicies, body.Name, &existingSP)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "security policy already exists: "+body.Name)
+		return
+	}
 	sp := SecurityPolicy{
 		ID:                fmt.Sprintf("%d", s.nextSeq()),
 		Name:              body.Name,

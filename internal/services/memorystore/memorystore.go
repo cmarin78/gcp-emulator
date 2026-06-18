@@ -118,6 +118,16 @@ func (s *Service) createInstance(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "instanceId is required")
 		return
 	}
+	var existing Instance
+	found, err := s.db.Get(bucketInstances, instanceKey(project, location, instanceID), &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "instance already exists: "+instanceID)
+		return
+	}
 	inst := Instance{
 		Name:              instanceName(project, location, instanceID),
 		DisplayName:       body.DisplayName,

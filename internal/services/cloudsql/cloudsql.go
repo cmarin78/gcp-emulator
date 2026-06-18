@@ -191,6 +191,16 @@ func (s *Svc) createInstance(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
 		return
 	}
+	var existingInst DatabaseInstance
+	found, err := s.db.Get(bucketInstances, instanceKey(project, body.Name), &existingInst)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "instancia ya existe: "+body.Name)
+		return
+	}
 	inst := DatabaseInstance{
 		Kind:            "sql#instance",
 		Name:            body.Name,
@@ -311,6 +321,16 @@ func (s *Svc) createDatabase(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
 		return
 	}
+	var existingDB Database
+	found, err := s.db.Get(bucketDatabases, databaseKey(project, instance, body.Name), &existingDB)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "base de datos ya existe: "+body.Name)
+		return
+	}
 	dbRes := Database{
 		Kind:      "sql#database",
 		Name:      body.Name,
@@ -423,6 +443,16 @@ func (s *Svc) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := orDefault(body.Host, "%")
+	var existingUser User
+	found, err := s.db.Get(bucketUsers, userKey(project, instance, host, body.Name), &existingUser)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "usuario ya existe: "+body.Name)
+		return
+	}
 	usr := User{
 		Kind:     "sql#user",
 		Name:     body.Name,

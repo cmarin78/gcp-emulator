@@ -152,6 +152,16 @@ func (s *Service) insertNetwork(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
 		return
 	}
+	var existing Network
+	found, err := s.db.Get(bucketNetworks, networkKey(body.Name), &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "red ya existe: "+body.Name)
+		return
+	}
 	auto := true
 	if body.AutoCreateSubnetworks != nil {
 		auto = *body.AutoCreateSubnetworks
@@ -225,6 +235,16 @@ func (s *Service) insertSubnetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" || body.Network == "" || body.IpCidrRange == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name, network e ipCidrRange son requeridos")
+		return
+	}
+	var existingSn Subnetwork
+	found, err := s.db.Get(bucketSubnetworks, subnetworkKey(region, body.Name), &existingSn)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "subred ya existe: "+body.Name)
 		return
 	}
 	sn := Subnetwork{
@@ -303,6 +323,16 @@ func (s *Service) insertFirewall(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
+		return
+	}
+	var existingFw Firewall
+	found, err := s.db.Get(bucketFirewalls, firewallKey(body.Name), &existingFw)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "firewall ya existe: "+body.Name)
 		return
 	}
 	fw := Firewall{
@@ -424,6 +454,16 @@ func (s *Service) insertDisk(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
+		return
+	}
+	var existingDisk Disk
+	found, err := s.db.Get(bucketDisks, diskKey(zone, body.Name), &existingDisk)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "disco ya existe: "+body.Name)
 		return
 	}
 	d := Disk{

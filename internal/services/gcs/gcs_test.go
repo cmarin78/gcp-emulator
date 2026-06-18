@@ -50,6 +50,18 @@ func TestBucketLifecycle(t *testing.T) {
 	}
 }
 
+// TestDuplicateCreateConflict asserts that creating a bucket whose name
+// already exists returns 409 ALREADY_EXISTS instead of silently overwriting.
+func TestDuplicateCreateConflict(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST", srv.URL+"/storage/v1/b", map[string]string{"name": "dup-bucket"}, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/storage/v1/b", map[string]string{"name": "dup-bucket"}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate bucket: want 409, got %d", status)
+	}
+}
+
 // TestObjectUploadDownloadDelete covers the simple-upload flow
 // (uploadType=media) plus metadata get, ?alt=media download, and delete --
 // the core of `gcloud storage cp`.

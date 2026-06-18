@@ -101,6 +101,16 @@ func (s *Service) createBucket(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
 		return
 	}
+	var existing Bucket
+	found, err := s.db.Get(bucketBuckets, body.Name, &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "bucket ya existe: "+body.Name)
+		return
+	}
 	b := Bucket{
 		Name:         body.Name,
 		ID:           body.Name,

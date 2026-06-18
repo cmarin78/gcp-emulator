@@ -88,9 +88,20 @@ func (s *Service) createRepository(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "format es requerido (ej. DOCKER, NPM, MAVEN)")
 		return
 	}
+	name := repositoryName(project, location, repoID)
+	var existing Repository
+	found, err := s.db.Get(bucketRepositories, name, &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "repositorio ya existe: "+name)
+		return
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	repo := Repository{
-		Name:        repositoryName(project, location, repoID),
+		Name:        name,
 		Format:      body.Format,
 		Description: body.Description,
 		Labels:      body.Labels,

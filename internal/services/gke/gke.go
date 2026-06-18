@@ -281,6 +281,16 @@ func (s *Service) createCluster(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "cluster.name is required")
 		return
 	}
+	var existingCluster Cluster
+	found, err := s.db.Get(bucketClusters, clusterKey(project, location, body.Cluster.Name), &existingCluster)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "cluster already exists: "+body.Cluster.Name)
+		return
+	}
 	c := body.Cluster
 	c.Location = location
 	c.Status = "RUNNING"
@@ -413,6 +423,16 @@ func (s *Service) createNodePool(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.NodePool.Name == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "nodePool.name is required")
+		return
+	}
+	var existingNP NodePool
+	found, err := s.db.Get(bucketNodePools, nodePoolKey(project, location, cluster, body.NodePool.Name), &existingNP)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "node pool already exists: "+body.NodePool.Name)
 		return
 	}
 	np := body.NodePool

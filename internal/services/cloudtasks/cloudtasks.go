@@ -223,6 +223,17 @@ func (s *Service) createTask(w http.ResponseWriter, r *http.Request) {
 	if taskID == "" {
 		s.seq++
 		taskID = fmt.Sprintf("task-%d", s.seq)
+	} else {
+		var existing Task
+		found, err := s.db.Get(bucketTasks, taskName(project, location, queueID, taskID), &existing)
+		if err != nil {
+			server.WriteError(w, 500, "INTERNAL", err.Error())
+			return
+		}
+		if found {
+			server.WriteError(w, 409, "ALREADY_EXISTS", "la task ya existe")
+			return
+		}
 	}
 
 	t := Task{

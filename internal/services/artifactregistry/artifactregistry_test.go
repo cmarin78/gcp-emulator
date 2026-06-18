@@ -63,3 +63,19 @@ func TestCreateRequiresFormat(t *testing.T) {
 		t.Fatalf("create without format: want 400, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflict asserts that creating a repository whose
+// client-specified repositoryId already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflict(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST",
+		srv.URL+"/v1/projects/proj1/locations/us-central1/repositories?repositoryId=dup-repo",
+		map[string]string{"format": "DOCKER"}, nil)
+
+	status := testutil.DoJSON(t, "POST",
+		srv.URL+"/v1/projects/proj1/locations/us-central1/repositories?repositoryId=dup-repo",
+		map[string]string{"format": "DOCKER"}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate repository: want 409, got %d", status)
+	}
+}

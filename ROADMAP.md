@@ -225,8 +225,10 @@ captured as a repeatable, automated regression check.
   making requests and decoding responses) and a `*_test.go` smoke-test
   file for all 23 service packages, covering each service's main
   create/get/list/update/delete lifecycle and its most important
-  validation/error paths (missing required fields, duplicate-create
-  conflicts, not-found lookups). `cmd/server` also has a registration test
+  validation/error paths (missing required fields, not-found lookups).
+  Note: this initial pass did **not** actually cover duplicate-create
+  conflicts despite the claim below — see "Emulation-gap audit" for the
+  follow-up that added that coverage. `cmd/server` also has a registration test
   that wires every service onto a single mux and asserts no route
   collisions panic at startup — a direct regression test for the
   duplicate-route bug found and fixed during Phase 8.
@@ -246,3 +248,52 @@ captured as a repeatable, automated regression check.
   real resource is always a separate `GET` away), plus one incorrect
   assumption about access-config IP synthesis only happening when the
   request already includes an `accessConfigs` entry to fill in.
+
+## Emulation-gap audit — duplicate-create conflicts
+
+New, unplanned pass following the automated test suite addition above,
+triggered by re-checking whether "shape-compatible" emulation was missing
+any behavior real clients actually depend on. The specific gap targeted:
+real GCP APIs return `409 ALREADY_EXISTS` when a client tries to create a
+resource under a client-specified ID/name that already exists, instead of
+silently overwriting it — Terraform and `gcloud` both rely on this (e.g. to
+surface a clear error on `terraform apply` re-runs against drifted state).
+A prior pass had added this check to some handlers but not audited it
+systematically across all 23 packages, and the test-suite section above
+incorrectly claimed blanket coverage that didn't exist yet.
+
+Real gaps found and fixed in production code (handlers that silently
+overwrote on a duplicate client-specified ID, now returning 409):
+
+- `iam.go` `createCustomRole` — had no check at all (`createServiceAccount`
+  in the same file already had one, which is what made the asymmetry easy
+  to miss on a casual read).
+- `firestore.go` `createDatabase` — had no check (`createDocument` in the
+  same file already had one).
+- `cloudtasks.go` `createTask` — had no check for the case where the client
+  supplies an explicit task name (the auto-generated-ID path was already
+  fine, since the emulator's own sequence counter can't collide).
+- `compute/routing.go` and `loadbalancing.go` — fixed in the prior
+  "Priorizar y corregir las brechas encontradas" pass (#49), before this
+  audit's test-writing phase; see git history for the exact diffs.
+
+Packages confirmed correct on direct source inspection, no fix needed:
+gcs (`createBucket`), pubsub (`createTopic`, `createSubscription`),
+secretmanager (`createSecret`), artifactregistry (`createRepository`),
+clouddns (`createZone`), cloudscheduler (`createJob`), compute.go/network.go
+(`instance`, `network`, `subnetwork`, `firewall`, `disk`), iam.go
+(`createServiceAccount`), firestore.go (`createDocument`).
+
+Intentionally left unchanged (not gaps): `cloudbuild` and `monitoring`
+mutations use server-generated IDs, which structurally cannot collide with
+a client-specified name. `gcs` object upload (`uploadObject`) intentionally
+has no check — re-uploading the same object name is supposed to replace it,
+matching real GCS semantics.
+
+Test coverage added for every fix and every already-correct handler above:
+a `TestDuplicateCreateConflict`/`TestDuplicateCreateConflicts` function in
+each of `compute_test.go`, `iam_test.go`, `gcs_test.go`, `pubsub_test.go`,
+`secretmanager_test.go`, `artifactregistry_test.go`, `clouddns_test.go`,
+`cloudtasks_test.go`, `cloudscheduler_test.go`, and `firestore_test.go` —
+asserting a second create call with the same client-specified ID returns
+409, immediately after a first call that returns 200.

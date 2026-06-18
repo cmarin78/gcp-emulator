@@ -93,3 +93,27 @@ func TestDocumentLifecycle(t *testing.T) {
 		t.Fatalf("delete doc: want 200, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflicts asserts that creating a database or document
+// whose client-specified ID already exists returns 409 ALREADY_EXISTS
+// instead of silently overwriting.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/databases", nil, nil)
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/databases", nil, nil)
+	if status != 409 {
+		t.Fatalf("duplicate database: want 409, got %d", status)
+	}
+
+	docBody := map[string]any{"fields": map[string]any{"name": map[string]string{"stringValue": "Alice"}}}
+	testutil.DoJSON(t, "POST",
+		srv.URL+"/v1/projects/proj1/databases/(default)/documents/users?documentId=dup-doc",
+		docBody, nil)
+	status = testutil.DoJSON(t, "POST",
+		srv.URL+"/v1/projects/proj1/databases/(default)/documents/users?documentId=dup-doc",
+		docBody, nil)
+	if status != 409 {
+		t.Fatalf("duplicate document: want 409, got %d", status)
+	}
+}

@@ -125,6 +125,16 @@ func (s *Service) createInstance(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "instanceId is required")
 		return
 	}
+	var existingInst Instance
+	found, err := s.db.Get(bucketInstances, instanceKey(project, body.InstanceID), &existingInst)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "instance already exists: "+body.InstanceID)
+		return
+	}
 	inst := Instance{
 		Name:            instanceName(project, body.InstanceID),
 		Config:          orDefault(body.Instance.Config, "regional-us-central1"),
@@ -232,6 +242,16 @@ func (s *Service) createDatabase(w http.ResponseWriter, r *http.Request) {
 	name := parseDatabaseNameFromCreateStatement(body.CreateStatement)
 	if name == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "createStatement must be of the form 'CREATE DATABASE <name>'")
+		return
+	}
+	var existingDB Database
+	found, err := s.db.Get(bucketDatabases, databaseKey(project, instance, name), &existingDB)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "database already exists: "+name)
 		return
 	}
 	dbRes := Database{

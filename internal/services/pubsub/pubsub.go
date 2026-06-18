@@ -100,7 +100,18 @@ func (s *Service) createTopic(w http.ResponseWriter, r *http.Request) {
 		Labels map[string]string `json:"labels"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	t := Topic{Name: topicName(project, topic), Labels: body.Labels}
+	name := topicName(project, topic)
+	var existing Topic
+	found, err := s.db.Get(bucketTopics, name, &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "topic ya existe: "+name)
+		return
+	}
+	t := Topic{Name: name, Labels: body.Labels}
 	if err := s.db.Put(bucketTopics, t.Name, t); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
@@ -239,12 +250,33 @@ func (s *Service) createSubscription(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "topic es requerido")
 		return
 	}
+	name := subscriptionName(project, subID)
+	var existingSub Subscription
+	found, err := s.db.Get(bucketSubscriptions, name, &existingSub)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "subscription ya existe: "+name)
+		return
+	}
+	var topicExists Topic
+	found, err = s.db.Get(bucketTopics, body.Topic, &topicExists)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "topic no encontrado: "+body.Topic)
+		return
+	}
 	ackDeadline := body.AckDeadlineSeconds
 	if ackDeadline == 0 {
 		ackDeadline = 10
 	}
 	sub := Subscription{
-		Name:               subscriptionName(project, subID),
+		Name:               name,
 		Topic:              body.Topic,
 		AckDeadlineSeconds: ackDeadline,
 		Labels:             body.Labels,

@@ -357,3 +357,33 @@ func TestRoutesLifecycle(t *testing.T) {
 		t.Fatalf("delete route: want 200, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflicts asserts that inserting any client-named
+// resource in this package (instance, network, subnetwork, firewall, disk,
+// router, route) twice with the same name returns 409 ALREADY_EXISTS instead
+// of silently overwriting.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+
+	cases := []struct {
+		label string
+		path  string
+		body  map[string]any
+	}{
+		{"instance", "/compute/v1/projects/proj1/zones/us-central1-a/instances", map[string]any{"name": "dup-instance"}},
+		{"network", "/compute/v1/projects/proj1/global/networks", map[string]any{"name": "dup-net"}},
+		{"subnetwork", "/compute/v1/projects/proj1/regions/us-central1/subnetworks", map[string]any{"name": "dup-subnet", "network": "default", "ipCidrRange": "10.0.0.0/24"}},
+		{"firewall", "/compute/v1/projects/proj1/global/firewalls", map[string]any{"name": "dup-fw"}},
+		{"disk", "/compute/v1/projects/proj1/zones/us-central1-a/disks", map[string]any{"name": "dup-disk"}},
+		{"router", "/compute/v1/projects/proj1/regions/us-central1/routers", map[string]any{"name": "dup-router", "network": "default"}},
+		{"route", "/compute/v1/projects/proj1/global/routes", map[string]any{"name": "dup-route", "network": "default", "destRange": "0.0.0.0/0"}},
+	}
+
+	for _, c := range cases {
+		testutil.DoJSON(t, "POST", srv.URL+c.path, c.body, nil)
+		status := testutil.DoJSON(t, "POST", srv.URL+c.path, c.body, nil)
+		if status != 409 {
+			t.Fatalf("duplicate %s: want 409, got %d", c.label, status)
+		}
+	}
+}

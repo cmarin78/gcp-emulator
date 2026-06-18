@@ -246,3 +246,32 @@ func TestSecurityPolicyLifecycle(t *testing.T) {
 		t.Fatalf("delete: want 200, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflicts asserts that inserting any of this package's
+// six resource types (plus securityPolicies) with a name that already
+// exists returns 409 ALREADY_EXISTS instead of silently overwriting.
+func TestDuplicateCreateConflicts(t *testing.T) {
+	srv := newTestServer(t)
+
+	cases := []struct {
+		label string
+		path  string
+		body  map[string]any
+	}{
+		{"healthCheck", "/compute/v1/projects/proj1/global/healthChecks", map[string]any{"name": "dup-hc", "type": "HTTP"}},
+		{"backendService", "/compute/v1/projects/proj1/global/backendServices", map[string]any{"name": "dup-backend"}},
+		{"urlMap", "/compute/v1/projects/proj1/global/urlMaps", map[string]any{"name": "dup-urlmap"}},
+		{"targetHttpProxy", "/compute/v1/projects/proj1/global/targetHttpProxies", map[string]any{"name": "dup-http-proxy"}},
+		{"targetHttpsProxy", "/compute/v1/projects/proj1/global/targetHttpsProxies", map[string]any{"name": "dup-https-proxy"}},
+		{"forwardingRule", "/compute/v1/projects/proj1/global/forwardingRules", map[string]any{"name": "dup-rule"}},
+		{"securityPolicy", "/compute/v1/projects/proj1/global/securityPolicies", map[string]any{"name": "dup-policy"}},
+	}
+
+	for _, c := range cases {
+		testutil.DoJSON(t, "POST", srv.URL+c.path, c.body, nil)
+		status := testutil.DoJSON(t, "POST", srv.URL+c.path, c.body, nil)
+		if status != 409 {
+			t.Fatalf("duplicate %s: want 409, got %d", c.label, status)
+		}
+	}
+}

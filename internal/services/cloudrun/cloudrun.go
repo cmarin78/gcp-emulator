@@ -139,8 +139,18 @@ func (s *Svc) createService(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "template.containers[0].image es requerido")
 		return
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
 	name := serviceName(project, location, serviceID)
+	var existingSvc Service
+	found, err := s.db.Get(bucketServices, name, &existingSvc)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if found {
+		server.WriteError(w, 409, "ALREADY_EXISTS", "servicio ya existe: "+name)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
 	svc := Service{
 		Name:                  name,
 		UID:                   fmt.Sprintf("uid-%d", time.Now().UnixNano()),

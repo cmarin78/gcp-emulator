@@ -71,3 +71,17 @@ func TestCreateRequiresInstanceId(t *testing.T) {
 		t.Fatalf("create without instanceId: want 400, got %d", status)
 	}
 }
+
+// TestDuplicateCreateConflict asserts that creating an instance whose
+// instanceId already exists returns 409 ALREADY_EXISTS.
+func TestDuplicateCreateConflict(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/instances?instanceId=my-cache",
+		map[string]any{"memorySizeGb": 4}, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/instances?instanceId=my-cache",
+		map[string]any{"memorySizeGb": 4}, nil)
+	if status != 409 {
+		t.Fatalf("duplicate instance: want 409, got %d", status)
+	}
+}
