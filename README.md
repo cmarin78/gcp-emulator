@@ -108,6 +108,32 @@ Implemented (functional subset, not exhaustive):
   gcloud's polling/selfLink resolution works the same way it does for
   networks/instances. No real traffic proxying — shape and resource graph
   only.
+- **Cloud Build**: builds
+  (`/v1/projects/{p}/locations/{l}/builds[/{build}]`, create/get/list),
+  status always `SUCCESS` — no real build execution. Mutations return a
+  `google.longrunning.Operation`.
+- **Compute networking extensions**: `compute.routers` and
+  `compute.routes` (global/regional), including Cloud NAT config nested on
+  routers (`nats[]`), rounding out the networking family already in place
+  (networks/subnetworks/firewalls).
+- **Cloud Armor**: `securityPolicies`
+  (`/compute/v1/projects/{p}/global/securityPolicies[/{policy}]`, CRUD),
+  referenced from `backendServices`, shape-only (no real traffic filtering).
+- **Memorystore (Redis)**: instances
+  (`/v1/projects/{p}/locations/{l}/instances[/{instance}]`, CRUD), always
+  `state: READY` with a synthesized host/port; mutations return a
+  `google.longrunning.Operation`.
+- **Cloud Spanner**: instances and databases
+  (`/v1/projects/{p}/instances[/{instance}[/databases[/{database}]]]`,
+  CRUD), database names parsed from the real `CREATE DATABASE <name>` DDL
+  statement (same syntax gcloud/Terraform send); always `state: READY`;
+  mutations return a `google.longrunning.Operation`.
+- **GKE (Kubernetes Engine)**: clusters and nodePools
+  (`/v1/projects/{p}/locations/{l}/clusters[/{cluster}[/nodePools[/{nodePool}]]]`,
+  CRUD, no `PATCH` on clusters), always `status: RUNNING` with a
+  synthesized endpoint — no real Kubernetes control plane; mutations
+  return a `container#operation` (GKE's own Operation shape, distinct from
+  the simpler `google.longrunning.Operation` used elsewhere).
 - **Web console** (`web/console`): minimal UI to view and manage buckets,
   instances, and service accounts.
 - Verified end-to-end with a real `terraform apply`/`destroy` against
@@ -115,10 +141,12 @@ Implemented (functional subset, not exhaustive):
   network interface), against `google_cloud_run_v2_service`, against
   `google_bigquery_dataset` + `google_bigquery_table`, and against
   `google_kms_key_ring` + `google_kms_crypto_key` — all apply and destroy
-  cleanly, no provider patches needed.
+  cleanly, no provider patches needed. Cloud Build, networking extensions,
+  Cloud Armor, Memorystore, Cloud Spanner, and GKE were smoke-tested live
+  via direct HTTP calls (see `E2E_TEST_REPORT.md`).
 
 Roadmap / what's next: see [ROADMAP.md](ROADMAP.md) for the full phased
-plan (all seven planned phases are now complete and verified; future work
+plan (all eight planned phases are now complete and verified; future work
 would be new, unplanned phases). The architecture
 (`internal/services/<service>`) is designed so new services can be added
 without touching existing ones.
@@ -150,6 +178,10 @@ internal/services/cloudtasks/       Cloud Tasks emulation (queues, tasks)
 internal/services/clouddns/         Cloud DNS emulation (managedZones, rrsets via changes)
 internal/services/loadbalancing/    Load Balancing emulation (healthChecks, backendServices,
                                      urlMaps, target proxies, forwardingRules — global only)
+internal/services/cloudbuild/       Cloud Build emulation (builds, status always SUCCESS)
+internal/services/memorystore/      Memorystore emulation (Redis instances, CRUD)
+internal/services/spanner/          Cloud Spanner emulation (instances, databases)
+internal/services/gke/              GKE emulation (clusters, nodePools — shape-only)
 web/console/                static frontend (HTML/CSS/JS, no build step)
 scripts/                    scripts to point the gcloud CLI at the emulator
 data/                       runtime embedded data file (gitignored)

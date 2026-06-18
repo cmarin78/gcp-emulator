@@ -149,3 +149,64 @@ git status --short
 
 Sin binario ni base de datos residual (`bin\e2e-test.exe` y
 `data\e2e-test.db` eliminados tras la prueba).
+
+## Annex: Phase 8 (Cloud Build, networking extensions, Cloud Armor, Memorystore, Cloud Spanner, GKE)
+
+Date: 2026-06-18
+Environment: ephemeral binary (`bin\emulator.exe`, port 8444, isolated test
+DB `data\phase8test.db`), tested live via PowerShell `Invoke-RestMethod`
+directly on the user's machine.
+
+### Summary
+
+All 6 new services were smoke-tested end to end with direct HTTP calls
+against the running emulator, covering every service registered together
+on the same mux. One real bug was found and fixed before testing could
+even start; once fixed, all 6 services worked correctly on the first
+re-attempt.
+
+| Service | Flow tested | Result |
+|---|---|---|
+| Cloud Build | create build, get | OK |
+| Compute networking extensions | create router (with NAT config), create route, list/get | OK |
+| Cloud Armor | create securityPolicy, get | OK |
+| Memorystore | create instance (`redis1`), get (state READY, host/port synthesized) | OK |
+| Cloud Spanner | create instance (`spanner1`), create database via `CREATE DATABASE mydb` DDL parsing, get database | OK |
+| GKE | create cluster (`cluster1`), create nodePool (`pool1`), get cluster (status RUNNING, endpoint synthesized) | OK |
+
+### Bug found and fixed
+
+**`http.ServeMux` route-pattern collision on startup.** Both `memorystore.go`
+and `gke.go` initially registered their own generic
+`GET /v1/projects/{project}/locations/{location}/operations/{operation}`
+polling endpoint — the exact same path pattern already owned by
+`artifactregistry.go` on the shared `/v1/*` mux. Go's `http.ServeMux`
+panics at registration time on duplicate patterns, so the emulator
+crashed immediately on startup with:
+
+```
+panic: pattern "GET /v1/projects/{project}/locations/{location}/operations/{operation}"
+(registered at memorystore.go:65) conflicts with pattern
+(registered at artifactregistry.go:56)
+```
+
+This was **not** caught by `go build ./...` or `go vet ./...` — it only
+surfaced when the binary was actually run and `Register()` was called for
+every service in sequence. Fixed by removing the duplicate route
+registration and the now-dead `getOperation` handler from both
+`memorystore.go` and `gke.go` (each annotated with a comment explaining
+the omission): every mutation in both services already resolves
+synchronously and returns `done: true` / `status: DONE` in its own
+response, so no client has a real reason to poll. `spanner.go` was
+unaffected since its own operations path is scoped under `/instances/`
+rather than `/locations/`, so it didn't collide.
+
+This validates that the "build and run the actual binary" step of this
+phase's testing was more than a formality — static analysis alone would
+have shipped a crashing binary.
+
+### Verification of cleanup
+
+Stopped the test emulator process and removed all ephemeral artifacts:
+`bin\emulator.exe`, `data\phase8test.db`, `phase8_out.log`,
+`phase8_err.log`, `phase8_pid.txt`. No leftover test artifacts remain.

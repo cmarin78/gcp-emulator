@@ -160,3 +160,42 @@ All five services — Resource Manager, Cloud Scheduler (`:run`), Cloud Tasks
 healthCheck → backendService → urlMap → targetHttpProxy → forwardingRule) —
 worked correctly on first try, zero bugs found. No leftover artifacts
 (`git status --short` clean of binaries/dbs after cleanup).
+
+## Phase 8 — CI/CD, extended networking, managed data stores
+
+New, unplanned phase. Ordered the same way as Phase 7: cheapest/most
+self-contained items first, largest API surface last.
+
+| Service | Minimum resources | Depends on | Why | Effort | Status |
+|---|---|---|---|---|---|
+| Cloud Build | `builds` (create/get/list, status always `SUCCESS`) | — | Ubiquitous in real Terraform/CI pipelines; trivial shape (no real build execution). | S | ✅ |
+| Compute networking extensions | `compute.routers`, `compute.routes`, Cloud NAT config on routers | `compute.networks` (already done) | Rounds out the networking family already in place (networks/subnets/firewalls); common alongside Load Balancing. | S | ✅ |
+| Cloud Armor | `securityPolicies` (global), referenced from `backendServices` | `loadbalancing.backendServices` (already done) | Direct extension of Load Balancing; low effort since it's a single new resource type. | S | ✅ |
+| Memorystore (Redis) | `instances` (CRUD) | — | Same CRUD-with-Operation pattern as Cloud SQL; common pairing with Compute/Cloud Run. | M | ✅ |
+| Cloud Spanner | `instances`, `databases` | — | Similar complexity to Cloud SQL (already implemented, good template to copy from). | M | ✅ |
+| GKE (Kubernetes Engine) | `clusters`, `nodePools` (CRUD, shape-only — no real cluster) | `compute.networks` (already done) | High demand in real-world Terraform, but the largest surface in this phase; same "shape-compatible, not behavior-complete" approach as Cloud Run. | L | ✅ |
+
+Lower priority, deliberately left out of this phase's table (large surface,
+narrower audience for a local emulator): Vertex AI, App Engine, Cloud
+Composer, Dataflow/Dataproc. Worth revisiting as a Phase 9 if there's
+specific demand.
+
+As with prior phases: mutations on the async-style services here
+(Cloud Build, Memorystore, Spanner, GKE) return their respective
+`Operation`-shaped resource, resolved synchronously, following the same
+"shape-compatible, not behavior-complete" approach used throughout this
+project.
+
+✅ Verified 2026-06-18: built and smoke-tested live on a real machine (Go
+1.26, ephemeral binary/db, see `E2E_TEST_REPORT.md` for the full Phase 8
+annex). All six services — Cloud Build, Compute routers/routes/NAT, Cloud
+Armor, Memorystore, Cloud Spanner (instance + database via DDL parsing),
+GKE (cluster + nodePool) — worked correctly via direct HTTP calls. One real
+bug was found and fixed during this pass: `http.ServeMux` panicked at
+startup on a duplicate route pattern (`GET .../operations/{operation}`)
+registered by both Memorystore and GKE, colliding with one already owned by
+Artifact Registry on the shared `/v1/*` mux — not caught by `go build`/`go
+vet`, only by actually running the binary. Fixed by removing the duplicate,
+now-dead routes/handlers from both new services (their mutations already
+resolve synchronously, so no client needs to poll). No leftover artifacts
+after cleanup.

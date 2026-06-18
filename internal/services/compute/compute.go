@@ -172,6 +172,17 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/disks", s.listDisks)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/disks/{disk}", s.getDisk)
 	mux.HandleFunc("DELETE /compute/v1/projects/{project}/zones/{zone}/disks/{disk}", s.deleteDisk)
+
+	mux.HandleFunc("POST /compute/v1/projects/{project}/regions/{region}/routers", s.insertRouter)
+	mux.HandleFunc("GET /compute/v1/projects/{project}/regions/{region}/routers", s.listRouters)
+	mux.HandleFunc("GET /compute/v1/projects/{project}/regions/{region}/routers/{router}", s.getRouter)
+	mux.HandleFunc("PATCH /compute/v1/projects/{project}/regions/{region}/routers/{router}", s.patchRouter)
+	mux.HandleFunc("DELETE /compute/v1/projects/{project}/regions/{region}/routers/{router}", s.deleteRouter)
+
+	mux.HandleFunc("POST /compute/v1/projects/{project}/global/routes", s.insertRoute)
+	mux.HandleFunc("GET /compute/v1/projects/{project}/global/routes", s.listRoutes)
+	mux.HandleFunc("GET /compute/v1/projects/{project}/global/routes/{route}", s.getRoute)
+	mux.HandleFunc("DELETE /compute/v1/projects/{project}/global/routes/{route}", s.deleteRoute)
 }
 
 func (s *Service) listZones(w http.ResponseWriter, r *http.Request) {

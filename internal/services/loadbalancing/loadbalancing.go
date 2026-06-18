@@ -41,16 +41,19 @@ type HealthCheck struct {
 }
 
 type BackendService struct {
-	ID                string          `json:"id"`
-	Name              string          `json:"name"`
-	Protocol          string          `json:"protocol,omitempty"`
-	PortName          string          `json:"portName,omitempty"`
-	TimeoutSec        int64           `json:"timeoutSec,omitempty"`
-	HealthChecks      []string        `json:"healthChecks,omitempty"`
-	Backends          json.RawMessage `json:"backends,omitempty"`
-	LoadBalancingScheme string        `json:"loadBalancingScheme,omitempty"`
-	CreationTimestamp string          `json:"creationTimestamp"`
-	SelfLink          string          `json:"selfLink"`
+	ID                  string          `json:"id"`
+	Name                string          `json:"name"`
+	Protocol            string          `json:"protocol,omitempty"`
+	PortName            string          `json:"portName,omitempty"`
+	TimeoutSec          int64           `json:"timeoutSec,omitempty"`
+	HealthChecks        []string        `json:"healthChecks,omitempty"`
+	Backends            json.RawMessage `json:"backends,omitempty"`
+	LoadBalancingScheme string          `json:"loadBalancingScheme,omitempty"`
+	// SecurityPolicy references a Cloud Armor securityPolicy (global
+	// selfLink), same as the real API's google_compute_backend_service.security_policy.
+	SecurityPolicy    string `json:"securityPolicy,omitempty"`
+	CreationTimestamp string `json:"creationTimestamp"`
+	SelfLink          string `json:"selfLink"`
 }
 
 type URLMap struct {
@@ -81,15 +84,15 @@ type TargetHTTPSProxy struct {
 }
 
 type ForwardingRule struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	IPAddress         string `json:"IPAddress,omitempty"`
-	IPProtocol        string `json:"IPProtocol,omitempty"`
-	PortRange         string `json:"portRange,omitempty"`
-	Target            string `json:"target,omitempty"`
+	ID                  string `json:"id"`
+	Name                string `json:"name"`
+	IPAddress           string `json:"IPAddress,omitempty"`
+	IPProtocol          string `json:"IPProtocol,omitempty"`
+	PortRange           string `json:"portRange,omitempty"`
+	Target              string `json:"target,omitempty"`
 	LoadBalancingScheme string `json:"loadBalancingScheme,omitempty"`
-	CreationTimestamp string `json:"creationTimestamp"`
-	SelfLink          string `json:"selfLink"`
+	CreationTimestamp   string `json:"creationTimestamp"`
+	SelfLink            string `json:"selfLink"`
 }
 
 type Service struct {
@@ -154,6 +157,11 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/forwardingRules", s.listForwardingRules)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/forwardingRules/{forwardingRule}", s.getForwardingRule)
 	mux.HandleFunc("DELETE /compute/v1/projects/{project}/global/forwardingRules/{forwardingRule}", s.deleteForwardingRule)
+
+	mux.HandleFunc("POST /compute/v1/projects/{project}/global/securityPolicies", s.insertSecurityPolicy)
+	mux.HandleFunc("GET /compute/v1/projects/{project}/global/securityPolicies", s.listSecurityPolicies)
+	mux.HandleFunc("GET /compute/v1/projects/{project}/global/securityPolicies/{securityPolicy}", s.getSecurityPolicy)
+	mux.HandleFunc("DELETE /compute/v1/projects/{project}/global/securityPolicies/{securityPolicy}", s.deleteSecurityPolicy)
 }
 
 func selfLink(project, kind, name string) string {
@@ -247,6 +255,7 @@ func (s *Service) insertBackendService(w http.ResponseWriter, r *http.Request) {
 		HealthChecks        []string        `json:"healthChecks"`
 		Backends            json.RawMessage `json:"backends"`
 		LoadBalancingScheme string          `json:"loadBalancingScheme"`
+		SecurityPolicy      string          `json:"securityPolicy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
@@ -265,6 +274,7 @@ func (s *Service) insertBackendService(w http.ResponseWriter, r *http.Request) {
 		HealthChecks:        body.HealthChecks,
 		Backends:            body.Backends,
 		LoadBalancingScheme: body.LoadBalancingScheme,
+		SecurityPolicy:      normalizeSecurityPolicyRef(project, body.SecurityPolicy),
 		CreationTimestamp:   time.Now().UTC().Format(time.RFC3339),
 		SelfLink:            selfLink(project, "backendServices", body.Name),
 	}
