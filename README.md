@@ -414,6 +414,23 @@ curl -X POST "localhost:8443/upload/storage/v1/b/my-bucket/o?name=hello.txt" \
 curl "localhost:8443/storage/v1/b/my-bucket/o/hello.txt?alt=media"
 ```
 
+## Testing
+
+Each service package under `internal/services/` has its own `*_test.go`
+smoke-test file (lifecycle CRUD + key validation/error paths), built on a
+shared harness in `internal/testutil` (in-memory BoltDB + an `httptest`
+server per test). `cmd/server` also has a test that registers every
+service on one mux and asserts there are no route collisions at startup.
+
+```bash
+go build ./...
+go vet ./...
+go test ./... -v
+```
+
+CI (`.github/workflows/ci.yml`) runs the same three commands on every
+push/PR.
+
 ## Design
 
 - **Portability**: a single Go binary plus a single BoltDB file. No

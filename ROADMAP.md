@@ -212,3 +212,37 @@ returns), a missing `instanceGroupManagers` endpoint that broke the GKE
 provider's post-apply consistency check, and a missing Spanner database
 DDL endpoint. Final `terraform apply` → `terraform destroy` cycle: 9/9
 resources created and destroyed cleanly, zero errors.
+
+## Automated test suite + CI
+
+New, unplanned addition following Phase 8: every prior phase had only been
+verified through manual/ephemeral runs against a real `gcloud`/Terraform
+client (see the annexes above and `E2E_TEST_REPORT.md`). None of that was
+captured as a repeatable, automated regression check.
+
+- Added `internal/testutil` (a shared `httptest`-based harness: an
+  in-memory BoltDB per test via `t.TempDir()`, plus a `DoJSON` helper for
+  making requests and decoding responses) and a `*_test.go` smoke-test
+  file for all 23 service packages, covering each service's main
+  create/get/list/update/delete lifecycle and its most important
+  validation/error paths (missing required fields, duplicate-create
+  conflicts, not-found lookups). `cmd/server` also has a registration test
+  that wires every service onto a single mux and asserts no route
+  collisions panic at startup — a direct regression test for the
+  duplicate-route bug found and fixed during Phase 8.
+- Added `.github/workflows/ci.yml`: a GitHub Actions workflow that runs
+  `go build ./...`, `go vet ./...`, and `go test ./... -v -race` on every
+  push/PR, on Go 1.22 (the toolchain version `go.mod` declares).
+- Verified 2026-06-18 on a real machine (Windows, Go 1.26 installed locally
+  — newer than the `go.mod` floor of 1.22, confirming the codebase doesn't
+  rely on anything past 1.22): `go vet ./...` clean, `go test ./... -v`
+  passing across all 23 service packages plus `cmd/server`. Two rounds of
+  real test-writing bugs were caught and fixed in this pass (not source
+  bugs): a `compute_test.go` package compile error from a missing local
+  `Operation` type, and six test-logic errors in the same file from
+  decoding `Operation`-wrapper responses directly into resource structs
+  for networks/subnetworks/firewalls/disks/routers/routes (this codebase's
+  insert/delete handlers return an `Operation`, not the resource — the
+  real resource is always a separate `GET` away), plus one incorrect
+  assumption about access-config IP synthesis only happening when the
+  request already includes an `accessConfigs` entry to fill in.
