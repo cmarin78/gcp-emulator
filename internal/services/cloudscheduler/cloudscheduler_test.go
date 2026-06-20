@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
@@ -76,6 +77,48 @@ func TestJobActionsRunPauseResume(t *testing.T) {
 	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/jobs/my-job:resume", nil, &resumed)
 	if status != 200 || resumed.State != "ENABLED" {
 		t.Fatalf("resume: status=%d job=%+v", status, resumed)
+	}
+}
+
+// TestJobRunDispatchesRealHTTP asserts that ":run" on a job with a real
+// httpTarget performs an actual HTTP call — the Phase 11 behavioral
+// upgrade — rather than only touching timestamps.
+func TestJobRunDispatchesRealHTTP(t *testing.T) {
+	hit := make(chan string, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(body)
+		hit <- string(body)
+	}))
+	t.Cleanup(target.Close)
+
+	srv := newTestServer(t)
+	// Schedule far in the future so the background firing goroutine doesn't
+	// also hit the target during the test, keeping the assertion below
+	// (single message on a buffered channel of size 1) deterministic.
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/jobs", map[string]any{
+		"name":     "projects/proj1/locations/us-central1/jobs/run-job",
+		"schedule": "0 0 1 1 *",
+		"httpTarget": map[string]any{
+			"uri":        target.URL,
+			"httpMethod": "POST",
+			"body":       "aGVsbG8=", // base64("hello")
+		},
+	}, nil)
+
+	var ran Job
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/locations/us-central1/jobs/run-job:run", nil, &ran)
+	if status != 200 || ran.LastAttemptTime == "" {
+		t.Fatalf("run: status=%d job=%+v", status, ran)
+	}
+
+	select {
+	case body := <-hit:
+		if body != "hello" {
+			t.Fatalf("dispatched body = %q, want %q", body, "hello")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for real HTTP dispatch")
 	}
 }
 

@@ -387,7 +387,7 @@ decode untouched on the reused variable. The `removePeering` handler itself
 was correct throughout. Fixed by decoding the second `GET` into a fresh
 variable.
 
-### Phase 11 — Behavioral logic layer (proposed)
+### Phase 11 — Behavioral logic layer (in progress)
 
 Everything through Phase 10 is "shape-compatible, not behavior-complete":
 resources are stored and returned correctly, but the emulator doesn't
@@ -396,15 +396,16 @@ runtime dependency — pure Go logic over data already in BoltDB, the same
 spirit as how tools like Packet Tracer or GNS3 simulate protocol behavior
 without real hardware.
 
-| Area | Behavior added |
-|---|---|
-| IAM / Org Policy | Enforcement middleware — requests actually get rejected when a policy/role would deny them, instead of every request silently succeeding. |
-| Networking | Real reachability evaluation across firewalls/peerings/routes (a `testIamPermissions`-style "can A reach B" trace), plus real DNS resolution for Cloud DNS zones. |
-| Pub/Sub, Scheduler, Tasks, Eventarc | Real delivery — push subscriptions, cron fires, task dispatch, and CloudEvent delivery all become genuine outbound HTTP calls on schedule/trigger, not just state transitions. |
-| Workflows | A real interpreter for the basic Workflows syntax (steps, conditionals, calls) instead of a fixed terminal status. |
-| Cloud Armor / Load Balancing | Real rule evaluation against simulated request attributes. |
-| Autoscaler, Billing Budgets | Real math — instance-group scaling decisions and budget accrual computed from actual usage signals instead of being static. |
-| Logging / Monitoring | Populated from the internal events all of the above now generate, instead of being empty stubs. |
+| Area | Behavior added | Status |
+|---|---|---|
+| Pub/Sub, Scheduler, Tasks | Real delivery — push subscriptions, cron fires, and task dispatch all become genuine outbound HTTP calls on schedule/trigger, not just state transitions. | **Done.** Cloud Scheduler: dependency-free cron evaluator (`internal/cronexpr`) drives a per-job goroutine that fires real HTTP requests to `httpTarget` on schedule, resumes on restart, and responds to `:run`/`:pause`/`:resume`. Cloud Tasks: `createTask` dispatches `httpRequest` for real (respecting `scheduleTime` and a `PAUSED` queue), incrementing `dispatchCount`. Pub/Sub: subscriptions with `pushConfig.pushEndpoint` deliver via real HTTP POST in the standard push wire format instead of queuing for pull; `modifyPushConfig` toggles push/pull mode. `pubsubTarget` on Scheduler jobs and `appEngineHttpRequest` on Tasks remain shape-only (would need to route through the emulator's own Pub/Sub or a real App Engine, respectively). |
+| IAM / Org Policy | Enforcement middleware — requests actually get rejected when a policy/role would deny them, instead of every request silently succeeding. | Pending. |
+| Networking | Real reachability evaluation across firewalls/peerings/routes (a `testIamPermissions`-style "can A reach B" trace), plus real DNS resolution for Cloud DNS zones. | Pending. |
+| Eventarc | Real CloudEvent delivery to triggers — needs a new "publish a CloudEvent" API surface that doesn't exist yet in the emulated API. | Pending. |
+| Workflows | A real interpreter for the basic Workflows syntax (steps, conditionals, calls) instead of a fixed terminal status. | Pending. |
+| Cloud Armor / Load Balancing | Real rule evaluation against simulated request attributes. | Pending. |
+| Autoscaler, Billing Budgets | Real math — instance-group scaling decisions and budget accrual computed from actual usage signals instead of being static. | Pending. |
+| Logging / Monitoring | Populated from the internal events all of the above now generate, instead of being empty stubs. | Pending. |
 
 This phase has no Docker/engine dependency and keeps the project's
 "single portable binary" property intact — it's a pure complexity/effort

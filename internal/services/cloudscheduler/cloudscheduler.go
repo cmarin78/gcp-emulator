@@ -1,25 +1,44 @@
 // Package cloudscheduler emula un subconjunto de la API de Cloud Scheduler
 // (cloudscheduler.googleapis.com/v1): jobs, con un trigger manual ":run".
-// Igual que Pub/Sub y los otros servicios async, esto es "shape-compatible,
-// no behavior-complete": no hay un cron real disparando los jobs, solo CRUD
-// y un :run que simula la ejecución actualizando el estado/timestamps.
+//
+// Fase 11 (capa de comportamiento): a diferencia de las fases anteriores,
+// un job con httpTarget y schedule ENABLED ahora dispara de verdad — un
+// goroutine por job calcula el próximo fire time con internal/cronexpr y
+// hace un HTTP request real al URI configurado en la hora que corresponde,
+// sin necesitar Docker ni ninguna dependencia nueva. pubsubTarget sigue
+// siendo solo shape (requeriría enrutar a través del propio Pub/Sub
+// emulado, lo cual queda para una próxima iteración).
 package cloudscheduler
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/cronexpr"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
 
 const bucketJobs = "cloudscheduler.jobs"
 
-// Job replica el recurso "Job" de la API v1 (subset: pubsubTarget/httpTarget
-// se aceptan como passthrough JSON, sin disparar nada real).
+// httpTarget mirrors the relevant subset of cloudscheduler#HttpTarget used
+// to actually dispatch the job, decoded out of the passthrough JSON.
+type httpTarget struct {
+	URI        string            `json:"uri"`
+	HTTPMethod string            `json:"httpMethod"`
+	Headers    map[string]string `json:"headers"`
+	Body       string            `json:"body"` // base64, same wire format as the real API
+}
+
+// Job replica el recurso "Job" de la API v1 (subset: pubsubTarget se acepta
+// como passthrough JSON sin disparar nada real; httpTarget sí se entrega).
 type Job struct {
 	Name            string          `json:"name"` // projects/{p}/locations/{l}/jobs/{j}
 	Description     string          `json:"description,omitempty"`
@@ -33,11 +52,119 @@ type Job struct {
 }
 
 type Service struct {
-	db *storage.DB
+	db         *storage.DB
+	httpClient *http.Client
+
+	mu    sync.Mutex
+	stops map[string]chan struct{} // job name -> stop signal for its firing goroutine
 }
 
 func New(db *storage.DB) *Service {
-	return &Service{db: db}
+	s := &Service{
+		db:         db,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		stops:      make(map[string]chan struct{}),
+	}
+	// Resume firing for any job that was already ENABLED with a real
+	// httpTarget before a restart — state lives in BoltDB, but the firing
+	// goroutines themselves don't, so they need to be restarted here.
+	_ = s.db.List(bucketJobs, "", func(key string, raw []byte) error {
+		var job Job
+		if err := json.Unmarshal(raw, &job); err != nil {
+			return err
+		}
+		if job.State == "ENABLED" {
+			s.startFiring(job)
+		}
+		return nil
+	})
+	return s
+}
+
+// startFiring launches (or restarts) the background goroutine that fires
+// job.HTTPTarget on schedule. No-op if the job has no schedule or no real
+// httpTarget to call.
+func (s *Service) startFiring(job Job) {
+	if job.Schedule == "" || len(job.HTTPTarget) == 0 {
+		return
+	}
+	var ht httpTarget
+	if err := json.Unmarshal(job.HTTPTarget, &ht); err != nil || ht.URI == "" {
+		return
+	}
+	sch, err := cronexpr.Parse(job.Schedule)
+	if err != nil {
+		return // schedule no es un cron estándar de 5 campos; queda solo como shape
+	}
+
+	s.mu.Lock()
+	if old, ok := s.stops[job.Name]; ok {
+		close(old)
+	}
+	stop := make(chan struct{})
+	s.stops[job.Name] = stop
+	s.mu.Unlock()
+
+	go s.fireLoop(job.Name, sch, ht, stop)
+}
+
+// stopFiring stops the firing goroutine for a job, if any (pause/delete).
+func (s *Service) stopFiring(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stop, ok := s.stops[name]; ok {
+		close(stop)
+		delete(s.stops, name)
+	}
+}
+
+func (s *Service) fireLoop(name string, sch *cronexpr.Schedule, ht httpTarget, stop chan struct{}) {
+	for {
+		next, err := sch.Next(time.Now().UTC())
+		if err != nil {
+			return
+		}
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-stop:
+			timer.Stop()
+			return
+		case <-timer.C:
+			s.dispatch(name, ht)
+		}
+	}
+}
+
+// dispatch performs the real HTTP call and records the attempt on the job.
+func (s *Service) dispatch(name string, ht httpTarget) {
+	method := ht.HTTPMethod
+	if method == "" {
+		method = "POST"
+	}
+	var body []byte
+	if ht.Body != "" {
+		body, _ = base64.StdEncoding.DecodeString(ht.Body)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, ht.URI, bytes.NewReader(body))
+	if err == nil {
+		for k, v := range ht.Headers {
+			req.Header.Set(k, v)
+		}
+		if resp, err := s.httpClient.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	var job Job
+	found, gerr := s.db.Get(bucketJobs, name, &job)
+	if gerr == nil && found {
+		job.LastAttemptTime = now
+		job.ScheduleTime = now
+		_ = s.db.Put(bucketJobs, name, job)
+	}
 }
 
 // Register monta las rutas de Cloud Scheduler, siguiendo los paths reales
@@ -110,6 +237,7 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+	s.startFiring(job)
 	server.WriteJSON(w, 200, job)
 }
 
@@ -150,6 +278,7 @@ func (s *Service) deleteJob(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+	s.stopFiring(name)
 	server.WriteJSON(w, 200, map[string]any{})
 }
 
@@ -176,16 +305,23 @@ func (s *Service) jobAction(w http.ResponseWriter, r *http.Request) {
 
 	switch action {
 	case "run":
-		// No hay un disparo real (sin HTTP/Pub/Sub de verdad); se simula la
-		// ejecución actualizando los timestamps, como pediría un test que
-		// verifica que el job "corrió".
+		// Disparo real e inmediato del httpTarget configurado (además del
+		// disparo automático por cron), igual que el ":run" de la API real.
 		now := time.Now().UTC().Format(time.RFC3339)
 		job.LastAttemptTime = now
 		job.ScheduleTime = now
+		if len(job.HTTPTarget) > 0 {
+			var ht httpTarget
+			if json.Unmarshal(job.HTTPTarget, &ht) == nil && ht.URI != "" {
+				go s.dispatch(name, ht)
+			}
+		}
 	case "pause":
 		job.State = "PAUSED"
+		s.stopFiring(name)
 	case "resume":
 		job.State = "ENABLED"
+		s.startFiring(job)
 	default:
 		server.WriteError(w, 404, "NOT_FOUND", "acción no soportada: "+action)
 		return

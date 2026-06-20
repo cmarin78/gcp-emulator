@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
@@ -100,6 +101,60 @@ func TestTaskLifecycle(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("delete task: want 200, got %d", status)
 	}
+}
+
+// TestTaskHTTPDispatchReal asserts that createTask, given a real httpRequest
+// target, actually performs the HTTP call and increments dispatchCount —
+// the Phase 11 behavioral upgrade, as opposed to just persisting shape.
+func TestTaskHTTPDispatchReal(t *testing.T) {
+	hit := make(chan string, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(body)
+		hit <- string(body)
+	}))
+	t.Cleanup(target.Close)
+
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "POST", srv.URL+"/v2/projects/proj1/locations/us-central1/queues", map[string]string{
+		"name": "projects/proj1/locations/us-central1/queues/q-dispatch",
+	}, nil)
+
+	var task Task
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v2/projects/proj1/locations/us-central1/queues/q-dispatch/tasks", map[string]any{
+		"task": map[string]any{
+			"httpRequest": map[string]any{
+				"url":        target.URL,
+				"httpMethod": "POST",
+				"body":       "aGVsbG8=", // base64("hello")
+			},
+		},
+	}, &task)
+	if status != 200 || task.Name == "" {
+		t.Fatalf("create task: status=%d task=%+v", status, task)
+	}
+
+	select {
+	case body := <-hit:
+		if body != "hello" {
+			t.Fatalf("dispatched body = %q, want %q", body, "hello")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for real HTTP dispatch")
+	}
+
+	// dispatchTask persists DispatchCount asynchronously right after the
+	// call; poll briefly instead of asserting immediately.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var got Task
+		testutil.DoJSON(t, "GET", srv.URL+"/v2/projects/proj1/locations/us-central1/queues/q-dispatch/tasks/task-1", nil, &got)
+		if got.DispatchCount > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("dispatchCount never incremented")
 }
 
 // TestDuplicateCreateConflicts asserts that creating a queue whose name

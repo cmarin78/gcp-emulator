@@ -1,9 +1,11 @@
 package pubsub
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
@@ -95,6 +97,84 @@ func TestTopicAndSubscriptionDelete(t *testing.T) {
 	status = testutil.DoJSON(t, "GET", srv.URL+"/v1/projects/proj1/topics/t1", nil, nil)
 	if status != 404 {
 		t.Fatalf("get deleted topic: want 404, got %d", status)
+	}
+}
+
+// TestPushSubscriptionDeliversRealHTTP asserts that publishing to a topic
+// with a push subscription configured actually delivers a real HTTP POST
+// to the pushEndpoint, using the standard Pub/Sub push wire format — the
+// Phase 11 behavioral upgrade over pull-only delivery.
+func TestPushSubscriptionDeliversRealHTTP(t *testing.T) {
+	hit := make(chan map[string]any, 1)
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		hit <- body
+	}))
+	t.Cleanup(endpoint.Close)
+
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/proj1/topics/push-topic", nil, nil)
+
+	var sub Subscription
+	status := testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/proj1/subscriptions/push-sub", map[string]any{
+		"topic": "projects/proj1/topics/push-topic",
+		"pushConfig": map[string]any{
+			"pushEndpoint": endpoint.URL,
+		},
+	}, &sub)
+	if status != 200 || sub.PushConfig == nil || sub.PushConfig.PushEndpoint != endpoint.URL {
+		t.Fatalf("create push subscription: status=%d sub=%+v", status, sub)
+	}
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/topics/push-topic:publish", map[string]any{
+		"messages": []map[string]string{{"data": "aGVsbG8="}},
+	}, nil)
+
+	select {
+	case body := <-hit:
+		if body["subscription"] != sub.Name {
+			t.Fatalf("push body subscription = %v, want %v", body["subscription"], sub.Name)
+		}
+		msg, ok := body["message"].(map[string]any)
+		if !ok || msg["data"] != "aGVsbG8=" {
+			t.Fatalf("push body message = %+v", body["message"])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for real push delivery")
+	}
+
+	// A push subscription should NOT also queue for pull.
+	var pullResp struct {
+		ReceivedMessages []ReceivedMessage `json:"receivedMessages"`
+	}
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/subscriptions/push-sub:pull", nil, &pullResp)
+	if len(pullResp.ReceivedMessages) != 0 {
+		t.Fatalf("push subscription unexpectedly queued for pull: %+v", pullResp.ReceivedMessages)
+	}
+}
+
+// TestModifyPushConfigSwitchesDeliveryMode asserts that modifyPushConfig
+// can both set and clear a subscription's push delivery.
+func TestModifyPushConfigSwitchesDeliveryMode(t *testing.T) {
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/proj1/topics/mpc-topic", nil, nil)
+	testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/proj1/subscriptions/mpc-sub", map[string]any{
+		"topic": "projects/proj1/topics/mpc-topic",
+	}, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/subscriptions/mpc-sub:modifyPushConfig", map[string]any{
+		"pushConfig": map[string]any{"pushEndpoint": "http://example.invalid/push"},
+	}, nil)
+	if status != 200 {
+		t.Fatalf("modifyPushConfig (set): want 200, got %d", status)
+	}
+
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/subscriptions/mpc-sub:modifyPushConfig", map[string]any{
+		"pushConfig": map[string]any{},
+	}, nil)
+	if status != 200 {
+		t.Fatalf("modifyPushConfig (clear): want 200, got %d", status)
 	}
 }
 

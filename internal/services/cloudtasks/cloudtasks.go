@@ -1,10 +1,17 @@
 // Package cloudtasks emula un subconjunto de la API de Cloud Tasks
-// (cloudtasks.googleapis.com/v2): queues y tasks. Igual que Cloud Scheduler,
-// esto es "shape-compatible, no behavior-complete": createTask encola la
-// tarea pero no hay un dispatcher real entregándola a ningún destino.
+// (cloudtasks.googleapis.com/v2): queues y tasks.
+//
+// Fase 11 (capa de comportamiento): createTask, si trae un httpRequest real,
+// efectivamente lo despacha — un HTTP request de verdad al url configurado,
+// respetando scheduleTime si está en el futuro, sin depender de Docker ni de
+// ninguna dependencia nueva. appEngineHttpRequest sigue siendo solo shape
+// (App Engine no está emulado).
 package cloudtasks
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,24 +33,84 @@ type Queue struct {
 	State string `json:"state"`
 }
 
-// Task replica el recurso "Task" (subset: httpRequest/appEngineHttpRequest
-// se aceptan como passthrough JSON, sin entregarse a ningún destino real).
+// Task replica el recurso "Task" (subset: appEngineHttpRequest se acepta
+// como passthrough JSON sin entregarse a ningún destino real, ya que App
+// Engine no está emulado; httpRequest sí se despacha de verdad).
 type Task struct {
-	Name           string          `json:"name"` // .../queues/{q}/tasks/{t}
-	ScheduleTime   string          `json:"scheduleTime,omitempty"`
-	CreateTime     string          `json:"createTime,omitempty"`
-	DispatchCount  int             `json:"dispatchCount"`
-	HTTPRequest    json.RawMessage `json:"httpRequest,omitempty"`
-	AppEngineHTTP  json.RawMessage `json:"appEngineHttpRequest,omitempty"`
+	Name          string          `json:"name"` // .../queues/{q}/tasks/{t}
+	ScheduleTime  string          `json:"scheduleTime,omitempty"`
+	CreateTime    string          `json:"createTime,omitempty"`
+	DispatchCount int             `json:"dispatchCount"`
+	HTTPRequest   json.RawMessage `json:"httpRequest,omitempty"`
+	AppEngineHTTP json.RawMessage `json:"appEngineHttpRequest,omitempty"`
+}
+
+// httpRequestSpec mirrors the relevant subset of cloudtasks#HttpRequest
+// needed to actually dispatch the task.
+type httpRequestSpec struct {
+	URL        string            `json:"url"`
+	HTTPMethod string            `json:"httpMethod"`
+	Headers    map[string]string `json:"headers"`
+	Body       string            `json:"body"` // base64, same wire format as the real API
 }
 
 type Service struct {
-	db  *storage.DB
-	seq int64
+	db         *storage.DB
+	seq        int64
+	httpClient *http.Client
 }
 
 func New(db *storage.DB) *Service {
-	return &Service{db: db}
+	return &Service{db: db, httpClient: &http.Client{Timeout: 10 * time.Second}}
+}
+
+// dispatchTask performs the real HTTP call for a task's httpRequest and
+// records the attempt (dispatchCount/scheduleTime) back onto the stored
+// task. Runs in its own goroutine, scheduled to respect task.ScheduleTime
+// when it's in the future.
+func (s *Service) dispatchTask(t Task) {
+	if len(t.HTTPRequest) == 0 {
+		return
+	}
+	var hr httpRequestSpec
+	if err := json.Unmarshal(t.HTTPRequest, &hr); err != nil || hr.URL == "" {
+		return
+	}
+
+	if t.ScheduleTime != "" {
+		if when, err := time.Parse(time.RFC3339, t.ScheduleTime); err == nil {
+			if d := time.Until(when); d > 0 {
+				time.Sleep(d)
+			}
+		}
+	}
+
+	method := hr.HTTPMethod
+	if method == "" {
+		method = "POST"
+	}
+	var body []byte
+	if hr.Body != "" {
+		body, _ = base64.StdEncoding.DecodeString(hr.Body)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, hr.URL, bytes.NewReader(body))
+	if err == nil {
+		for k, v := range hr.Headers {
+			req.Header.Set(k, v)
+		}
+		if resp, err := s.httpClient.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}
+
+	var current Task
+	found, gerr := s.db.Get(bucketTasks, t.Name, &current)
+	if gerr == nil && found {
+		current.DispatchCount++
+		_ = s.db.Put(bucketTasks, t.Name, current)
+	}
 }
 
 // Register monta las rutas de Cloud Tasks, siguiendo los paths reales de
@@ -246,6 +313,9 @@ func (s *Service) createTask(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.Put(bucketTasks, t.Name, t); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
+	}
+	if q.State != "PAUSED" {
+		go s.dispatchTask(t)
 	}
 	server.WriteJSON(w, 200, t)
 }

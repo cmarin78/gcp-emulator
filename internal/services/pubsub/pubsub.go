@@ -3,9 +3,17 @@
 // Topics y subscriptions se persisten en BoltDB; la cola de mensajes
 // pendientes vive en memoria (alcanza para flujos típicos de
 // gcloud/Terraform, pero no sobrevive a un restart del emulador).
+//
+// Fase 11 (capa de comportamiento): una subscription con pushConfig.
+// pushEndpoint ahora entrega de verdad — publish() hace un HTTP POST real
+// al endpoint configurado con el wire format estándar de Pub/Sub push, en
+// vez de solo encolar el mensaje para pull. Las subscriptions sin
+// pushConfig siguen funcionando exactamente igual que antes (pull/ack).
 package pubsub
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,12 +36,19 @@ type Topic struct {
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
+// PushConfig replica pubsub#PushConfig (subset).
+type PushConfig struct {
+	PushEndpoint string            `json:"pushEndpoint"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
+}
+
 // Subscription replica el recurso "Subscription".
 type Subscription struct {
 	Name               string            `json:"name"` // projects/{project}/subscriptions/{subscription}
 	Topic              string            `json:"topic"`
 	AckDeadlineSeconds int               `json:"ackDeadlineSeconds,omitempty"`
 	Labels             map[string]string `json:"labels,omitempty"`
+	PushConfig         *PushConfig       `json:"pushConfig,omitempty"`
 }
 
 // Message es el mensaje publicado, tal como lo devuelve la API (data en base64).
@@ -52,8 +67,9 @@ type ReceivedMessage struct {
 }
 
 type Service struct {
-	db  *storage.DB
-	seq int64
+	db         *storage.DB
+	seq        int64
+	httpClient *http.Client
 
 	mu      sync.Mutex
 	pending map[string][]ReceivedMessage // subscription name -> mensajes sin entregar
@@ -61,8 +77,9 @@ type Service struct {
 
 func New(db *storage.DB) *Service {
 	return &Service{
-		db:      db,
-		pending: make(map[string][]ReceivedMessage),
+		db:         db,
+		pending:    make(map[string][]ReceivedMessage),
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -224,6 +241,12 @@ func (s *Service) publish(w http.ResponseWriter, r *http.Request, project, topic
 		}
 		ids = append(ids, msg.MessageID)
 		for _, sub := range subs {
+			if sub.PushConfig != nil && sub.PushConfig.PushEndpoint != "" {
+				// Subscription de push: entrega real por HTTP, sin pasar
+				// por la cola de pull (igual que la API real).
+				go s.deliverPush(sub, msg)
+				continue
+			}
 			s.seq++
 			s.pending[sub.Name] = append(s.pending[sub.Name], ReceivedMessage{
 				AckID:   fmt.Sprintf("ack-%d", s.seq),
@@ -234,6 +257,35 @@ func (s *Service) publish(w http.ResponseWriter, r *http.Request, project, topic
 	server.WriteJSON(w, 200, map[string]any{"messageIds": ids})
 }
 
+// deliverPush hace un HTTP POST real al pushEndpoint de la subscription,
+// con el wire format estándar de Pub/Sub push:
+// {"message": {...}, "subscription": "projects/.../subscriptions/..."}.
+func (s *Service) deliverPush(sub Subscription, msg Message) {
+	payload, err := json.Marshal(map[string]any{
+		"message":      msg,
+		"subscription": sub.Name,
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", sub.PushConfig.PushEndpoint, bytes.NewReader(payload))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range sub.PushConfig.Attributes {
+		req.Header.Set(k, v)
+	}
+	if resp, err := s.httpClient.Do(req); err == nil {
+		resp.Body.Close()
+	}
+	// Sin reintentos ni dead-lettering: si el endpoint falla, el mensaje se
+	// pierde (a diferencia de la API real). Documentado como límite en el
+	// ROADMAP — agregar retry/backoff queda para una próxima iteración.
+}
+
 func (s *Service) createSubscription(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	subID := r.PathValue("subscription")
@@ -241,6 +293,7 @@ func (s *Service) createSubscription(w http.ResponseWriter, r *http.Request) {
 		Topic              string            `json:"topic"`
 		AckDeadlineSeconds int               `json:"ackDeadlineSeconds"`
 		Labels             map[string]string `json:"labels"`
+		PushConfig         *PushConfig       `json:"pushConfig"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
@@ -280,6 +333,7 @@ func (s *Service) createSubscription(w http.ResponseWriter, r *http.Request) {
 		Topic:              body.Topic,
 		AckDeadlineSeconds: ackDeadline,
 		Labels:             body.Labels,
+		PushConfig:         body.PushConfig,
 	}
 	if err := s.db.Put(bucketSubscriptions, sub.Name, sub); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
@@ -343,9 +397,42 @@ func (s *Service) subscriptionAction(w http.ResponseWriter, r *http.Request) {
 		s.pull(w, r, name)
 	case "acknowledge":
 		s.acknowledge(w, r, name)
+	case "modifyPushConfig":
+		s.modifyPushConfig(w, r, name)
 	default:
 		server.WriteError(w, 404, "NOT_FOUND", "acción no soportada: "+action)
 	}
+}
+
+func (s *Service) modifyPushConfig(w http.ResponseWriter, r *http.Request, name string) {
+	var body struct {
+		PushConfig *PushConfig `json:"pushConfig"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	var sub Subscription
+	found, err := s.db.Get(bucketSubscriptions, name, &sub)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "subscription no encontrada")
+		return
+	}
+	// pushConfig vacío ({}) vuelve la subscription a modo pull, igual que la API real.
+	if body.PushConfig == nil || body.PushConfig.PushEndpoint == "" {
+		sub.PushConfig = nil
+	} else {
+		sub.PushConfig = body.PushConfig
+	}
+	if err := s.db.Put(bucketSubscriptions, name, sub); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	server.WriteJSON(w, 200, map[string]any{})
 }
 
 func (s *Service) pull(w http.ResponseWriter, r *http.Request, name string) {
