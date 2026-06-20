@@ -341,9 +341,55 @@ and Compute (`/compute/v1/`) — rather than the bare `/v1/*` most other
 services share. Point Terraform's `filestore_custom_endpoint` provider
 field at `<emulator>/file/v1/`.
 
-## Phase 10 (proposed, lower priority) — Larger/niche surfaces
+## Phase 10 — Networking, security & governance add-ons ✅ completed
 
-Deliberately ordered after Phase 9: each of these has a materially larger
+All 6 items below are implemented, tested, and verified building/passing on
+a real machine (`gofmt`/`go build`/`go vet`/`go test ./...` all clean across
+every package, including `cmd/server`'s full-mux registration test — no
+route collisions among the 6 new packages and the 27 pre-existing ones).
+Reviewed after Phase 9 by auditing the 27 packages then implemented against
+the resource types that show up most often in real-world `google` Terraform
+configs alongside what we already emulate (Compute networking, IAM, Cloud
+SQL, Memorystore, GKE). The gap that stood out: every one of these is a
+small, frequently-referenced *supporting* resource that other
+already-emulated services depend on in real IaC, rather than a new
+standalone product. Implemented cheapest/most-connected-to-existing-code
+first, same convention as prior phases.
+
+| Service | Minimum resources | Depends on | Why | Effort | Status |
+|---|---|---|---|---|---|
+| Service Networking (private VPC connection) | `services/{service}/connections` (CRUD, `google_service_networking_connection`) | `compute.networks` (already done) | The standard way Terraform wires Cloud SQL/Memorystore/Filestore to a VPC for private IP; extremely common pairing with services we already emulate, currently has no emulated counterpart at all. | S | ✅ |
+| Compute network peering | `networks.addPeering`/`networks.removePeering` as a sub-resource of the existing `networks` resource (`google_compute_network_peering`) | `compute.networks` (already done) | Small, additive extension to an existing resource (same pattern as Cloud CDN on `backendServices` in Phase 9); common in multi-VPC/shared-VPC Terraform layouts. | S | ✅ |
+| Identity-Aware Proxy (IAP) | `iap.googleapis.com` IAP settings + `iap_brand`/`iap_client` shapes (CRUD, shape-only) | `compute` (already done) | Frequently paired with load balancers and GKE in security-conscious Terraform (`google_iap_brand`, `google_iap_client`, backend service IAP settings). | S | ✅ |
+| Organization Policy | `policies` on `projects/{p}` / `organizations/{o}` (CRUD, `google_org_policy_policy`) | `resourcemanager` (already done) | Near-universal in landing-zone/governance Terraform modules; small API surface, reuses the existing resourcemanager package's project resource. | S | ✅ |
+| Cloud Billing Budgets | `billingAccounts/{account}/budgets` (CRUD, `google_billing_budget`) | — | Common in cost-governance Terraform; self-contained, no real billing data needed since budgets are just thresholds + notification config. | S | ✅ |
+| Certificate Manager | `projects/{p}/locations/{l}/certificates`, `certificateMaps` (CRUD, no real cert issuance — always report ACTIVE) | `loadbalancing` (already done) | `google_certificate_manager_certificate`/`certificate_map` are the modern way to attach TLS to load balancers/CDN, which we just added in Phase 9; closes that loop. | M | ✅ |
+
+Service Networking and Certificate Manager mutations return the simpler
+`google.longrunning.Operation` shape (same convention as
+vpcaccess/workflows/eventarc/filestore), and Compute network peering reuses
+Compute's own `Operation` shape (`s.ops.Done`) since it's a sub-resource of
+the existing `networks` resource. Organization Policy and Cloud Billing
+Budgets are a deliberate exception to the "Operation everywhere" pattern:
+both are genuinely synchronous in the real API (no LRO wrapper at all), so
+their handlers return the resource directly — matching real API behavior
+rather than the codebase's more common async-style convention.
+
+One bug was found and fixed during this phase's build/test pass — unlike
+the Phase 8/9 incidents, this one was a test-logic bug, not a production
+bug: `TestNetworkPeering` initially failed because it reused the same `net
+Network` variable across two sequential `GET` calls. After `removePeering`
+empties the peering list, the second `GET` response omits the
+`peerings` field entirely (`omitempty` on an empty slice) — and
+`json.Unmarshal` only overwrites fields actually present in the decoded
+JSON, leaving the previous (non-empty) `Peerings` value from the first
+decode untouched on the reused variable. The `removePeering` handler itself
+was correct throughout. Fixed by decoding the second `GET` into a fresh
+variable.
+
+### Phase 11 (proposed, lower priority) — Larger/niche surfaces
+
+Deliberately ordered after Phase 10: each of these has a materially larger
 API surface and/or a narrower audience for a *local* emulator (these
 services' value is usually tied to real managed infrastructure — actual
 GPUs, actual Spark clusters, actual App Engine sandboxing — that a
@@ -360,7 +406,6 @@ shape-only emulator can't meaningfully stand in for beyond satisfying
 
 ### Recommendation
 
-Phase 9 is done; Phase 10 remains opportunistic/on-demand rather than
-committed work, given the narrower audience and larger surface of each
-item — revisit only if there's specific demand for Vertex AI, App Engine,
-Dataproc, Dataflow, or Cloud Composer.
+Phase 9 and Phase 10 are both done. Treat Phase 11 as opportunistic/
+on-demand rather than committed work, given the narrower audience and
+larger surface of each item.

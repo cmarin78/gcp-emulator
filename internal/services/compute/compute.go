@@ -160,6 +160,8 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/networks", s.listNetworks)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/networks/{network}", s.getNetwork)
 	mux.HandleFunc("DELETE /compute/v1/projects/{project}/global/networks/{network}", s.deleteNetwork)
+	mux.HandleFunc("POST /compute/v1/projects/{project}/global/networks/{network}/addPeering", s.addPeering)
+	mux.HandleFunc("POST /compute/v1/projects/{project}/global/networks/{network}/removePeering", s.removePeering)
 
 	mux.HandleFunc("POST /compute/v1/projects/{project}/regions/{region}/subnetworks", s.insertSubnetwork)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/regions/{region}/subnetworks", s.listSubnetworks)

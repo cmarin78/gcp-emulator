@@ -18,6 +18,8 @@ import (
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/services/artifactregistry"
 	"github.com/cesar/gcp-emulator/internal/services/bigquery"
+	"github.com/cesar/gcp-emulator/internal/services/billingbudgets"
+	"github.com/cesar/gcp-emulator/internal/services/certificatemanager"
 	"github.com/cesar/gcp-emulator/internal/services/cloudbuild"
 	"github.com/cesar/gcp-emulator/internal/services/clouddns"
 	"github.com/cesar/gcp-emulator/internal/services/cloudfunctions"
@@ -32,14 +34,17 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/gcs"
 	"github.com/cesar/gcp-emulator/internal/services/gke"
 	"github.com/cesar/gcp-emulator/internal/services/iam"
+	"github.com/cesar/gcp-emulator/internal/services/iap"
 	"github.com/cesar/gcp-emulator/internal/services/kms"
 	"github.com/cesar/gcp-emulator/internal/services/loadbalancing"
 	"github.com/cesar/gcp-emulator/internal/services/logging"
 	"github.com/cesar/gcp-emulator/internal/services/memorystore"
 	"github.com/cesar/gcp-emulator/internal/services/monitoring"
+	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
 	"github.com/cesar/gcp-emulator/internal/services/pubsub"
 	"github.com/cesar/gcp-emulator/internal/services/resourcemanager"
 	"github.com/cesar/gcp-emulator/internal/services/secretmanager"
+	"github.com/cesar/gcp-emulator/internal/services/servicenetworking"
 	"github.com/cesar/gcp-emulator/internal/services/spanner"
 	"github.com/cesar/gcp-emulator/internal/services/vpcaccess"
 	"github.com/cesar/gcp-emulator/internal/services/workflows"
@@ -87,6 +92,11 @@ func TestAllServicesRegisterWithoutPanic(t *testing.T) {
 	filestore.New(db).Register(mux)
 	workflows.New(db).Register(mux)
 	eventarc.New(db).Register(mux)
+	servicenetworking.New(db).Register(mux)
+	iap.New(db).Register(mux)
+	orgpolicy.New(db).Register(mux)
+	billingbudgets.New(db).Register(mux)
+	certificatemanager.New(db).Register(mux)
 
 	// A trivial sanity request: the mux should at least be wired up enough
 	// to return *some* response (even a 404) instead of nil-dereferencing.

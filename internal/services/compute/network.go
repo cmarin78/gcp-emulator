@@ -22,12 +22,27 @@ const (
 )
 
 type Network struct {
-	ID                    string `json:"id"`
-	Name                  string `json:"name"`
-	Description           string `json:"description,omitempty"`
-	AutoCreateSubnetworks bool   `json:"autoCreateSubnetworks"`
-	CreationTimestamp     string `json:"creationTimestamp"`
-	SelfLink              string `json:"selfLink"`
+	ID                    string           `json:"id"`
+	Name                  string           `json:"name"`
+	Description           string           `json:"description,omitempty"`
+	AutoCreateSubnetworks bool             `json:"autoCreateSubnetworks"`
+	CreationTimestamp     string           `json:"creationTimestamp"`
+	SelfLink              string           `json:"selfLink"`
+	Peerings              []NetworkPeering `json:"peerings,omitempty"`
+}
+
+// NetworkPeering mirrors compute#NetworkPeering, the nested resource
+// created/removed via the network's addPeering/removePeering custom
+// methods (google_compute_network_peering in Terraform). Real peerings
+// negotiate asynchronously and can land in INACTIVE if the peer network
+// hasn't reciprocated; this emulator always reports ACTIVE, matching the
+// "shape-compatible, not behavior-complete" approach used elsewhere.
+type NetworkPeering struct {
+	Name                 string `json:"name"`
+	Network              string `json:"network"`
+	State                string `json:"state"`
+	StateDetails         string `json:"stateDetails,omitempty"`
+	ExchangeSubnetRoutes bool   `json:"exchangeSubnetRoutes"`
 }
 
 type Subnetwork struct {
@@ -218,6 +233,99 @@ func (s *Service) deleteNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	op := s.ops.Done("delete", fmt.Sprintf("/compute/v1/projects/%s/global/networks/%s", project, name),
 		fmt.Sprintf("%s/projects/%s/global/operations", opsBase(r), project))
+	server.WriteJSON(w, 200, op)
+}
+
+// addPeering implements networks.addPeering (POST .../networks/{network}/
+// addPeering), creating or replacing a named peering entry on the network.
+func (s *Service) addPeering(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	name := r.PathValue("network")
+	var n Network
+	found, err := s.db.Get(bucketNetworks, networkKey(name), &n)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "red no encontrada")
+		return
+	}
+	var body struct {
+		NetworkPeering struct {
+			Name                 string `json:"name"`
+			Network              string `json:"network"`
+			ExchangeSubnetRoutes bool   `json:"exchangeSubnetRoutes"`
+		} `json:"networkPeering"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if body.NetworkPeering.Name == "" || body.NetworkPeering.Network == "" {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "networkPeering.name y networkPeering.network son requeridos")
+		return
+	}
+	peering := NetworkPeering{
+		Name:                 body.NetworkPeering.Name,
+		Network:              normalizeGlobalRef(project, "networks", body.NetworkPeering.Network),
+		State:                "ACTIVE",
+		StateDetails:         "[2/2] Connected.",
+		ExchangeSubnetRoutes: body.NetworkPeering.ExchangeSubnetRoutes,
+	}
+	replaced := false
+	for i := range n.Peerings {
+		if n.Peerings[i].Name == peering.Name {
+			n.Peerings[i] = peering
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		n.Peerings = append(n.Peerings, peering)
+	}
+	if err := s.db.Put(bucketNetworks, networkKey(n.Name), n); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	op := s.ops.Done("addPeering", n.SelfLink, fmt.Sprintf("%s/projects/%s/global/operations", opsBase(r), project))
+	server.WriteJSON(w, 200, op)
+}
+
+// removePeering implements networks.removePeering (POST .../networks/
+// {network}/removePeering), dropping a named peering entry by name.
+func (s *Service) removePeering(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	name := r.PathValue("network")
+	var n Network
+	found, err := s.db.Get(bucketNetworks, networkKey(name), &n)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "red no encontrada")
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	kept := make([]NetworkPeering, 0, len(n.Peerings))
+	for _, p := range n.Peerings {
+		if p.Name != body.Name {
+			kept = append(kept, p)
+		}
+	}
+	n.Peerings = kept
+	if err := s.db.Put(bucketNetworks, networkKey(n.Name), n); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	op := s.ops.Done("removePeering", n.SelfLink, fmt.Sprintf("%s/projects/%s/global/operations", opsBase(r), project))
 	server.WriteJSON(w, 200, op)
 }
 

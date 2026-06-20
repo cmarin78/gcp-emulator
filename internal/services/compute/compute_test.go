@@ -241,6 +241,47 @@ func TestNetworksSubnetworksFirewalls(t *testing.T) {
 	}
 }
 
+// TestNetworkPeering covers networks.addPeering/removePeering (Phase 10:
+// google_compute_network_peering), asserting the peering shows up nested
+// on the network resource and can be replaced/removed by name.
+func TestNetworkPeering(t *testing.T) {
+	srv := newTestServer(t)
+
+	testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/global/networks", map[string]any{"name": "net-a"}, nil)
+	testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/global/networks", map[string]any{"name": "net-b"}, nil)
+
+	var addOp Operation
+	status := testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/global/networks/net-a/addPeering", map[string]any{
+		"networkPeering": map[string]any{
+			"name":                 "peer-a-b",
+			"network":              "net-b",
+			"exchangeSubnetRoutes": true,
+		},
+	}, &addOp)
+	if status != 200 || addOp.Status != "DONE" || addOp.OperationType != "addPeering" {
+		t.Fatalf("addPeering: status=%d op=%+v", status, addOp)
+	}
+
+	var net Network
+	status = testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/global/networks/net-a", nil, &net)
+	if status != 200 || len(net.Peerings) != 1 || net.Peerings[0].State != "ACTIVE" || !net.Peerings[0].ExchangeSubnetRoutes {
+		t.Fatalf("get network after addPeering: status=%d net=%+v", status, net)
+	}
+
+	var removeOp Operation
+	status = testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/global/networks/net-a/removePeering",
+		map[string]any{"name": "peer-a-b"}, &removeOp)
+	if status != 200 || removeOp.Status != "DONE" {
+		t.Fatalf("removePeering: status=%d op=%+v", status, removeOp)
+	}
+
+	var netAfterRemove Network
+	status = testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/global/networks/net-a", nil, &netAfterRemove)
+	if status != 200 || len(netAfterRemove.Peerings) != 0 {
+		t.Fatalf("get network after removePeering: status=%d net=%+v", status, netAfterRemove)
+	}
+}
+
 // TestImagesCatalog covers the static, read-only images catalog (list,
 // get-by-name, get-by-family) -- there is no create route for images.
 func TestImagesCatalog(t *testing.T) {
