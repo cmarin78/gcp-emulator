@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
+	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
 
@@ -294,6 +295,11 @@ func (s *Service) insertInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ifaces := s.resolveNetworkInterfaces(project, body.NetworkInterfaces)
+	if hasExternalAccess(ifaces) && orgpolicy.Denies(s.db, project, "compute.vmExternalIpAccess") {
+		server.WriteError(w, 412, "FAILED_PRECONDITION",
+			"el acceso por IP externa está bloqueado por la política de organización constraints/compute.vmExternalIpAccess")
+		return
+	}
 
 	meta := Metadata{Kind: "compute#metadata", Fingerprint: fakeFingerprint(fmt.Sprintf("meta-%d", s.seq))}
 	if body.Metadata != nil {
@@ -371,6 +377,19 @@ func (s *Service) resolveAttachedDisks(project, zone, instanceName string, in []
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// hasExternalAccess reporta si alguna interfaz de red de la instancia pide
+// una IP externa (accessConfigs no vacío, igual que la API real interpreta
+// la presencia de un ONE_TO_ONE_NAT) -- usado para decidir si aplica el
+// constraint de organización compute.vmExternalIpAccess.
+func hasExternalAccess(ifaces []NetworkIface) bool {
+	for _, ni := range ifaces {
+		if len(ni.AccessConfigs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveNetworkInterfaces normaliza referencias a network/subnetwork (acepta

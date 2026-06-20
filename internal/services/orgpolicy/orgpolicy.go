@@ -181,3 +181,32 @@ func (s *Service) deletePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	server.WriteJSON(w, 200, map[string]any{})
 }
+
+// Denies reports whether the given boolean-style constraint (e.g.
+// "iam.disableServiceAccountKeyCreation", "compute.vmExternalIpAccess") is
+// currently enforced as a deny for project. A rule counts as a deny if it
+// sets DenyAll, or if it sets Enforce without AllowAll -- the two shapes a
+// real client uses to turn a boolean constraint "on" (gcloud's
+// `--enforce`/`resource-manager org-policies enable-enforce` and the
+// Terraform google_org_policy_policy boolean_policy both end up writing one
+// of these). If no policy was ever set for the constraint, this returns
+// false: an unset constraint doesn't restrict anything in the real API
+// either, and a handful of concrete handlers (service account key
+// creation, Compute external IP) call this directly to become real,
+// testable enforcement instead of a generic policy interpreter.
+func Denies(db *storage.DB, project, constraint string) bool {
+	var p Policy
+	found, err := db.Get(bucketPolicies, policyKey(project, constraint), &p)
+	if err != nil || !found || p.Spec == nil {
+		return false
+	}
+	for _, rule := range p.Spec.Rules {
+		if rule.DenyAll {
+			return true
+		}
+		if rule.Enforce && !rule.AllowAll {
+			return true
+		}
+	}
+	return false
+}

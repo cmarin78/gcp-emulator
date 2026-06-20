@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
 
@@ -172,5 +173,49 @@ func TestServiceAccountKeyLifecycle(t *testing.T) {
 	status = testutil.DoJSON(t, "GET", srv.URL+"/v1/projects/proj1/serviceAccounts/key-sa/keys", nil, &listResp)
 	if status != 200 || len(listResp.Keys) != 1 || listResp.Keys[0].PrivateKeyData != "" {
 		t.Fatalf("list keys: status=%d keys=%+v", status, listResp.Keys)
+	}
+}
+
+// TestServiceAccountKeyBlockedByOrgPolicy covers the new Phase 11
+// enforcement: registering iam and orgpolicy on the same mux/db (as
+// cmd/server/main.go does), enabling the
+// iam.disableServiceAccountKeyCreation boolean constraint makes key
+// creation fail with FAILED_PRECONDITION instead of silently succeeding,
+// and disabling it again (allowAll) lets it through.
+func TestServiceAccountKeyBlockedByOrgPolicy(t *testing.T) {
+	db := testutil.NewDB(t)
+	mux := http.NewServeMux()
+	New(db).Register(mux)
+	orgpolicy.New(db).Register(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/serviceAccounts", map[string]any{
+		"accountId": "key-sa",
+	}, nil)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v2/projects/proj1/policies", map[string]any{
+		"name": "projects/proj1/policies/iam.disableServiceAccountKeyCreation",
+		"spec": map[string]any{"rules": []map[string]any{{"enforce": true}}},
+	}, nil)
+	if status != 200 {
+		t.Fatalf("create org policy: want 200, got %d", status)
+	}
+
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/serviceAccounts/key-sa/keys", nil, nil)
+	if status != 412 {
+		t.Fatalf("create key with constraint enforced: want 412, got %d", status)
+	}
+
+	status = testutil.DoJSON(t, "PATCH", srv.URL+"/v2/projects/proj1/policies/iam.disableServiceAccountKeyCreation", map[string]any{
+		"spec": map[string]any{"rules": []map[string]any{{"enforce": true, "allowAll": true}}},
+	}, nil)
+	if status != 200 {
+		t.Fatalf("relax org policy: want 200, got %d", status)
+	}
+
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/serviceAccounts/key-sa/keys", nil, nil)
+	if status != 200 {
+		t.Fatalf("create key after relaxing constraint: want 200, got %d", status)
 	}
 }

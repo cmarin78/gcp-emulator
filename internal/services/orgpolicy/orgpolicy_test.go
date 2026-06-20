@@ -85,3 +85,43 @@ func TestUpdatePolicyNotFound(t *testing.T) {
 		t.Fatalf("update missing policy: want 404, got %d", status)
 	}
 }
+
+// TestDeniesBooleanConstraint covers the Denies helper added in Phase 11
+// for concrete org-policy enforcement (called from iam.go and compute.go):
+// an unset constraint never denies, enforce:true (without allowAll) denies,
+// enforce:true+allowAll:true stops denying, and denyAll:true denies again.
+func TestDeniesBooleanConstraint(t *testing.T) {
+	db := testutil.NewDB(t)
+	mux := http.NewServeMux()
+	New(db).Register(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	const constraint = "iam.disableServiceAccountKeyCreation"
+
+	if Denies(db, "proj-denies", constraint) {
+		t.Fatalf("Denies before any policy is set: want false")
+	}
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v2/projects/proj-denies/policies", map[string]any{
+		"name": "projects/proj-denies/policies/" + constraint,
+		"spec": map[string]any{"rules": []map[string]any{{"enforce": true}}},
+	}, nil)
+	if !Denies(db, "proj-denies", constraint) {
+		t.Fatalf("Denies after enforce:true: want true")
+	}
+
+	testutil.DoJSON(t, "PATCH", srv.URL+"/v2/projects/proj-denies/policies/"+constraint, map[string]any{
+		"spec": map[string]any{"rules": []map[string]any{{"enforce": true, "allowAll": true}}},
+	}, nil)
+	if Denies(db, "proj-denies", constraint) {
+		t.Fatalf("Denies after enforce:true+allowAll:true: want false")
+	}
+
+	testutil.DoJSON(t, "PATCH", srv.URL+"/v2/projects/proj-denies/policies/"+constraint, map[string]any{
+		"spec": map[string]any{"rules": []map[string]any{{"denyAll": true}}},
+	}, nil)
+	if !Denies(db, "proj-denies", constraint) {
+		t.Fatalf("Denies after denyAll:true: want true")
+	}
+}

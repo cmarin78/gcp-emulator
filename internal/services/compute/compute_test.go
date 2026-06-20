@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
 
@@ -174,6 +175,52 @@ func TestInsertInstanceRequiresName(t *testing.T) {
 	status := testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instances", map[string]any{}, nil)
 	if status != 400 {
 		t.Fatalf("insert without name: want 400, got %d", status)
+	}
+}
+
+// TestInsertInstanceBlockedByVmExternalIpAccessPolicy covers the Phase 11
+// org-policy enforcement added to insertInstance: registering compute and
+// orgpolicy on the same mux/db (as cmd/server/main.go does), enabling
+// constraints/compute.vmExternalIpAccess makes an instance request with an
+// accessConfig (external IP) fail with FAILED_PRECONDITION, while an
+// instance with no accessConfigs (no external IP requested) is unaffected.
+func TestInsertInstanceBlockedByVmExternalIpAccessPolicy(t *testing.T) {
+	db := testutil.NewDB(t)
+	mux := http.NewServeMux()
+	New(db).Register(mux)
+	orgpolicy.New(db).Register(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v2/projects/proj1/policies", map[string]any{
+		"name": "projects/proj1/policies/compute.vmExternalIpAccess",
+		"spec": map[string]any{"rules": []map[string]any{{"enforce": true}}},
+	}, nil)
+	if status != 200 {
+		t.Fatalf("create org policy: want 200, got %d", status)
+	}
+
+	withExternalIP := map[string]any{
+		"name": "external-instance",
+		"networkInterfaces": []map[string]any{
+			{"network": "default", "accessConfigs": []map[string]any{{}}},
+		},
+	}
+	status = testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instances", withExternalIP, nil)
+	if status != 412 {
+		t.Fatalf("insert with external IP + constraint enforced: want 412, got %d", status)
+	}
+
+	noExternalIP := map[string]any{
+		"name": "internal-instance",
+		"networkInterfaces": []map[string]any{
+			{"network": "default"},
+		},
+	}
+	var op Operation
+	status = testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instances", noExternalIP, &op)
+	if status != 200 || op.Status != "DONE" {
+		t.Fatalf("insert without external IP: want 200/DONE, got status=%d op=%+v", status, op)
 	}
 }
 

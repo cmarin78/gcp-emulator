@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/cesar/gcp-emulator/internal/iamenforce"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/services/artifactregistry"
 	"github.com/cesar/gcp-emulator/internal/services/bigquery"
@@ -108,7 +109,14 @@ func main() {
 
 	log.Printf("GCP Emulator escuchando en %s (db=%s, web=%s)", *addr, *dbPath, *staticDir)
 	log.Printf("Endpoints: /storage/v1/*  /compute/v1/* (Compute, instance templates/MIGs/autoscalers, Load Balancing + Cloud CDN, Cloud Armor, routers/routes, network peering)  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry, Firestore, KMS, Cloud Scheduler, Cloud Build, Memorystore, Cloud Spanner, GKE, VPC Access connectors, Workflows, Eventarc, Service Networking connections, IAP brands/clients, Cloud Billing Budgets, Certificate Manager)  /file/v1/* (Filestore)  /v2/* (Cloud Run services + Jobs, Cloud Functions, Logging sinks, Cloud Tasks, Org Policy)  /sql/v1beta4/* (Cloud SQL)  /bigquery/v2/* (BigQuery)  /v3/* (Monitoring alert policies, Resource Manager projects)  /dns/v1/* (Cloud DNS)  /healthz")
-	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
+	// iamenforce envuelve todo el handler con una capa de IAM opcional: solo
+	// actúa sobre requests que mandan el header X-Emulator-Caller (ningún
+	// cliente real -- gcloud/Terraform -- lo manda), así que gcloud/Terraform
+	// y los más de 30 paquetes de tests existentes siguen funcionando sin
+	// cambios; un caller que sí lo manda obtiene un 403 PERMISSION_DENIED
+	// real cuando la política IAM del proyecto no lo cubre.
+	handler := iamenforce.Middleware(db)(srv.Handler())
+	if err := http.ListenAndServe(*addr, handler); err != nil {
 		log.Fatal(err)
 	}
 }

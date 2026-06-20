@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
+	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
 
@@ -460,6 +461,11 @@ func (s *Service) createServiceAccountKey(w http.ResponseWriter, r *http.Request
 	}
 	if !found {
 		server.WriteError(w, 404, "NOT_FOUND", "service account no encontrada")
+		return
+	}
+	if orgpolicy.Denies(s.db, project, "iam.disableServiceAccountKeyCreation") {
+		server.WriteError(w, 412, "FAILED_PRECONDITION",
+			"la creación de claves de service account está bloqueada por la política de organización constraints/iam.disableServiceAccountKeyCreation")
 		return
 	}
 
