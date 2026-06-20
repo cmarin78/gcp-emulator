@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
@@ -96,13 +97,21 @@ func (s *Service) dispatchTask(t Task) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, hr.URL, bytes.NewReader(body))
+	status, severity := "ok", "INFO"
 	if err == nil {
 		for k, v := range hr.Headers {
 			req.Header.Set(k, v)
 		}
-		if resp, err := s.httpClient.Do(req); err == nil {
+		if resp, derr := s.httpClient.Do(req); derr == nil {
 			resp.Body.Close()
+			if resp.StatusCode >= 400 {
+				status, severity = fmt.Sprintf("http %d", resp.StatusCode), "ERROR"
+			}
+		} else {
+			status, severity = derr.Error(), "ERROR"
 		}
+	} else {
+		status, severity = err.Error(), "ERROR"
 	}
 
 	var current Task
@@ -111,6 +120,15 @@ func (s *Service) dispatchTask(t Task) {
 		current.DispatchCount++
 		_ = s.db.Put(bucketTasks, t.Name, current)
 	}
+
+	project := activity.ProjectOf(t.Name)
+	activity.RecordLog(project, activity.LogEntry{
+		LogName:     fmt.Sprintf("projects/%s/logs/cloudtasks.googleapis.com%%2Ftask_operations_log", project),
+		Severity:    severity,
+		TextPayload: fmt.Sprintf("task %s dispatched %s %s: %s", t.Name, method, hr.URL, status),
+		Resource:    map[string]any{"type": "cloud_tasks_queue", "labels": map[string]string{"task_name": t.Name}},
+	})
+	activity.IncrCounter(project, "cloudtasks.googleapis.com/queue/task_attempt_count", map[string]string{"task_name": t.Name})
 }
 
 // Register monta las rutas de Cloud Tasks, siguiendo los paths reales de

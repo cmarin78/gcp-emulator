@@ -97,3 +97,67 @@ func TestGetSinkNotFound(t *testing.T) {
 		t.Fatalf("get missing sink: want 404, got %d", status)
 	}
 }
+
+// TestEntriesWriteAndList covers the round trip: a client writes entries
+// (one with a top-level default severity, one overriding it), then lists
+// them back filtered by resourceNames, asserting both are present with the
+// expected fields. Uses a project name unique to this test ("proj-entries")
+// since internal/activity is process-global state shared across tests in
+// this binary.
+func TestEntriesWriteAndList(t *testing.T) {
+	srv := newTestServer(t)
+
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v2/entries:write", map[string]any{
+		"logName":  "projects/proj-entries/logs/my-log",
+		"severity": "INFO",
+		"resource": map[string]any{"type": "global"},
+		"entries": []map[string]any{
+			{"textPayload": "first entry"},
+			{"textPayload": "second entry", "severity": "ERROR"},
+		},
+	}, nil)
+	if status != 200 {
+		t.Fatalf("entries:write: want 200, got %d", status)
+	}
+
+	var list struct {
+		Entries []map[string]any `json:"entries"`
+	}
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v2/entries:list", map[string]any{
+		"resourceNames": []string{"projects/proj-entries"},
+	}, &list)
+	if status != 200 || len(list.Entries) != 2 {
+		t.Fatalf("entries:list: status=%d entries=%+v", status, list.Entries)
+	}
+	if list.Entries[0]["severity"] != "INFO" || list.Entries[0]["textPayload"] != "first entry" {
+		t.Fatalf("unexpected first entry: %+v", list.Entries[0])
+	}
+	if list.Entries[1]["severity"] != "ERROR" || list.Entries[1]["textPayload"] != "second entry" {
+		t.Fatalf("unexpected second entry: %+v", list.Entries[1])
+	}
+}
+
+// TestEntriesListFilterBySeverity covers the simple substring filter
+// support: filtering by "ERROR" should only return the matching entry.
+func TestEntriesListFilterBySeverity(t *testing.T) {
+	srv := newTestServer(t)
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v2/entries:write", map[string]any{
+		"logName": "projects/proj-entries-filter/logs/my-log",
+		"entries": []map[string]any{
+			{"textPayload": "ok one", "severity": "INFO"},
+			{"textPayload": "bad one", "severity": "ERROR"},
+		},
+	}, nil)
+
+	var list struct {
+		Entries []map[string]any `json:"entries"`
+	}
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v2/entries:list", map[string]any{
+		"resourceNames": []string{"projects/proj-entries-filter"},
+		"filter":        "ERROR",
+	}, &list)
+	if status != 200 || len(list.Entries) != 1 || list.Entries[0]["textPayload"] != "bad one" {
+		t.Fatalf("filtered list: status=%d entries=%+v", status, list.Entries)
+	}
+}

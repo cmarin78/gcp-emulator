@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
 
@@ -151,6 +152,21 @@ func TestPushSubscriptionDeliversRealHTTP(t *testing.T) {
 	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/subscriptions/push-sub:pull", nil, &pullResp)
 	if len(pullResp.ReceivedMessages) != 0 {
 		t.Fatalf("push subscription unexpectedly queued for pull: %+v", pullResp.ReceivedMessages)
+	}
+
+	// activity.RecordLog/IncrCounter run right after the push HTTP call
+	// completes (Fase 11 Logging/Monitoring wiring); poll briefly since it's
+	// not synchronized with the channel receive above.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		series := activity.ListTimeSeries("proj1", "pubsub.googleapis.com/subscription/push_request_count")
+		if len(series) == 1 && len(series[0].Points) > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for recorded push_request_count series")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

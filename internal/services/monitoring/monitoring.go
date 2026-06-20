@@ -1,17 +1,19 @@
 // Package monitoring emula un subconjunto de Cloud Monitoring
-// (monitoring.googleapis.com/v3): únicamente alertPolicies a nivel de
-// proyecto. Es un stub de métricas: no hay series temporales reales ni
-// evaluación de condiciones, solo persistencia CRUD de la política, lo
-// necesario para que `google_monitoring_alert_policy` de Terraform
-// funcione end-to-end.
+// (monitoring.googleapis.com/v3): alertPolicies a nivel de proyecto (CRUD
+// puro, sin evaluación real de condiciones) y, desde la Fase 11,
+// timeSeries reales: cuando Cloud Scheduler/Tasks/Pub/Sub disparan de
+// verdad, incrementan contadores en internal/activity, y listTimeSeries
+// los devuelve en vez de una lista siempre vacía.
 package monitoring
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
@@ -49,9 +51,10 @@ func (s *Svc) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v3/projects/{project}/alertPolicies/{policy}", s.patchAlertPolicy)
 	mux.HandleFunc("DELETE /v3/projects/{project}/alertPolicies/{policy}", s.deleteAlertPolicy)
 
-	// Stub minimo de timeSeries: list siempre devuelve vacio (no hay
-	// pipeline real de metricas), pero el endpoint existe para clientes
-	// que lo consulten.
+	// timeSeries.list ahora refleja actividad real (Fase 11): cuando Cloud
+	// Scheduler/Tasks/Pub/Sub disparan de verdad, incrementan contadores en
+	// internal/activity, y este endpoint los traduce a la forma de
+	// monitoring.v3.TimeSeries.
 	mux.HandleFunc("GET /v3/projects/{project}/timeSeries", s.listTimeSeries)
 }
 
@@ -190,8 +193,49 @@ func (s *Svc) deleteAlertPolicy(w http.ResponseWriter, r *http.Request) {
 	server.WriteJSON(w, 200, map[string]any{})
 }
 
+// metricTypeFromFilter extrae el valor de metric.type="..." del lenguaje de
+// filtros de Monitoring (p.ej. `metric.type="cloudscheduler.googleapis.com/job/execution_count"`).
+// No implementa el lenguaje de filtros completo (AND, resource.type, etc.):
+// si no encuentra el marcador metric.type="...", devuelve el filtro crudo
+// para usarlo como substring match, y si el filtro está vacío no filtra
+// por tipo de métrica.
+func metricTypeFromFilter(filter string) string {
+	const marker = `metric.type="`
+	idx := strings.Index(filter, marker)
+	if idx < 0 {
+		return filter
+	}
+	rest := filter[idx+len(marker):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
 func (s *Svc) listTimeSeries(w http.ResponseWriter, r *http.Request) {
-	server.WriteJSON(w, 200, map[string]any{"timeSeries": []any{}})
+	project := r.PathValue("project")
+	metricType := metricTypeFromFilter(r.URL.Query().Get("filter"))
+	series := activity.ListTimeSeries(project, metricType)
+
+	out := make([]map[string]any, 0, len(series))
+	for _, ts := range series {
+		points := make([]map[string]any, 0, len(ts.Points))
+		for _, p := range ts.Points {
+			points = append(points, map[string]any{
+				"interval": map[string]any{"endTime": p.Timestamp},
+				"value":    map[string]any{"int64Value": fmt.Sprintf("%d", int64(p.Value))},
+			})
+		}
+		out = append(out, map[string]any{
+			"metric":     map[string]any{"type": ts.MetricType},
+			"resource":   map[string]any{"type": "global"},
+			"metricKind": "CUMULATIVE",
+			"valueType":  "INT64",
+			"points":     points,
+		})
+	}
+	server.WriteJSON(w, 200, map[string]any{"timeSeries": out})
 }
 
 func orDefault(v, def string) string {

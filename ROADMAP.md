@@ -25,8 +25,10 @@ own `Register(mux)`, following the pattern already used by IAM/GCS/Compute.
 - BigQuery: datasets, tables (synchronous, no Operation).
 - Cloud KMS: keyrings, cryptokeys, cryptoKeyVersions (`:destroy` action); no delete on
   keyrings/cryptokeys, matching the real API.
-- Cloud Logging: project-level sinks (stub, no real log pipeline).
-- Cloud Monitoring: alert policies + empty `timeSeries` stub.
+- Cloud Logging: project-level sinks, plus real `entries:write`/`entries:list`
+  backed by `internal/activity` (Phase 11).
+- Cloud Monitoring: alert policies, plus `timeSeries` populated from real
+  activity recorded by Cloud Scheduler/Tasks/Pub/Sub (Phase 11).
 
 ## Phase 1 — Complete Compute for real IaC
 
@@ -405,7 +407,7 @@ without real hardware.
 | Workflows | A real interpreter for the basic Workflows syntax (steps, conditionals, calls) instead of a fixed terminal status. | Pending. |
 | Cloud Armor / Load Balancing | Real rule evaluation against simulated request attributes. | Pending. |
 | Autoscaler, Billing Budgets | Real math — instance-group scaling decisions and budget accrual computed from actual usage signals instead of being static. | Pending. |
-| Logging / Monitoring | Populated from the internal events all of the above now generate, instead of being empty stubs. | Pending. |
+| Logging / Monitoring | Populated from the internal events all of the above now generate, instead of being empty stubs. | **Done.** New `internal/activity` package (in-memory, capped, dependency-free) is the shared event recorder both sides depend on, avoiding an import cycle between the producer services and Logging/Monitoring. Cloud Scheduler dispatch, Cloud Tasks dispatch, and Pub/Sub push delivery now each call `activity.RecordLog`/`activity.IncrCounter` right after their real HTTP attempt, recording success/failure (severity INFO/ERROR). Cloud Logging gained real `entries:write`/`entries:list` endpoints (previously didn't exist at all — only sinks CRUD did) backed by `activity.RecordLog`/`ListLogs`, with a simple substring `filter`. Cloud Monitoring's `listTimeSeries` no longer returns a hardcoded empty list — it reads `activity.ListTimeSeries(project, metricType)`, parsing the real API's `metric.type="..."` filter syntax, and shapes points as `CUMULATIVE`/`INT64` `monitoring.v3.TimeSeries`. |
 
 This phase has no Docker/engine dependency and keeps the project's
 "single portable binary" property intact — it's a pure complexity/effort

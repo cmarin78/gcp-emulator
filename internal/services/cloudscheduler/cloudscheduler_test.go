@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
 
@@ -119,6 +120,26 @@ func TestJobRunDispatchesRealHTTP(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for real HTTP dispatch")
+	}
+
+	// activity.RecordLog/IncrCounter run just after the HTTP call completes
+	// (Fase 11 Logging/Monitoring wiring), slightly after the target server
+	// already received the request -- poll briefly instead of asserting
+	// immediately.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		logs := activity.ListLogs("proj1")
+		if len(logs) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for activity log entry")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	series := activity.ListTimeSeries("proj1", "cloudscheduler.googleapis.com/job/execution_count")
+	if len(series) != 1 || len(series[0].Points) == 0 {
+		t.Fatalf("want a recorded execution_count series, got %+v", series)
 	}
 }
 

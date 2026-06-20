@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
 
@@ -146,15 +147,34 @@ func TestTaskHTTPDispatchReal(t *testing.T) {
 	// dispatchTask persists DispatchCount asynchronously right after the
 	// call; poll briefly instead of asserting immediately.
 	deadline := time.Now().Add(2 * time.Second)
+	dispatched := false
 	for time.Now().Before(deadline) {
 		var got Task
 		testutil.DoJSON(t, "GET", srv.URL+"/v2/projects/proj1/locations/us-central1/queues/q-dispatch/tasks/task-1", nil, &got)
 		if got.DispatchCount > 0 {
-			return
+			dispatched = true
+			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("dispatchCount never incremented")
+	if !dispatched {
+		t.Fatal("dispatchCount never incremented")
+	}
+
+	// activity.RecordLog/IncrCounter run right alongside the DispatchCount
+	// persist (Fase 11 Logging/Monitoring wiring); poll briefly since it's
+	// not synchronized with the GET above.
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		series := activity.ListTimeSeries("proj1", "cloudtasks.googleapis.com/queue/task_attempt_count")
+		if len(series) == 1 && len(series[0].Points) > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for recorded task_attempt_count series")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // TestDuplicateCreateConflicts asserts that creating a queue whose name

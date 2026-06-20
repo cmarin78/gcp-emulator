@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/cronexpr"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
@@ -135,7 +136,10 @@ func (s *Service) fireLoop(name string, sch *cronexpr.Schedule, ht httpTarget, s
 	}
 }
 
-// dispatch performs the real HTTP call and records the attempt on the job.
+// dispatch performs the real HTTP call and records the attempt on the job,
+// plus a real log entry + metric point via internal/activity so that
+// Logging/Monitoring reflect what actually happened instead of staying
+// empty stubs.
 func (s *Service) dispatch(name string, ht httpTarget) {
 	method := ht.HTTPMethod
 	if method == "" {
@@ -148,13 +152,21 @@ func (s *Service) dispatch(name string, ht httpTarget) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, ht.URI, bytes.NewReader(body))
+	status, severity := "ok", "INFO"
 	if err == nil {
 		for k, v := range ht.Headers {
 			req.Header.Set(k, v)
 		}
-		if resp, err := s.httpClient.Do(req); err == nil {
+		if resp, derr := s.httpClient.Do(req); derr == nil {
 			resp.Body.Close()
+			if resp.StatusCode >= 400 {
+				status, severity = fmt.Sprintf("http %d", resp.StatusCode), "ERROR"
+			}
+		} else {
+			status, severity, err = derr.Error(), "ERROR", derr
 		}
+	} else {
+		status, severity = err.Error(), "ERROR"
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -165,6 +177,15 @@ func (s *Service) dispatch(name string, ht httpTarget) {
 		job.ScheduleTime = now
 		_ = s.db.Put(bucketJobs, name, job)
 	}
+
+	project := activity.ProjectOf(name)
+	activity.RecordLog(project, activity.LogEntry{
+		LogName:     fmt.Sprintf("projects/%s/logs/cloudscheduler.googleapis.com%%2Fexecutions", project),
+		Severity:    severity,
+		TextPayload: fmt.Sprintf("job %s dispatched %s %s: %s", name, method, ht.URI, status),
+		Resource:    map[string]any{"type": "cloud_scheduler_job", "labels": map[string]string{"job_id": name}},
+	})
+	activity.IncrCounter(project, "cloudscheduler.googleapis.com/job/execution_count", map[string]string{"job_name": name})
 }
 
 // Register monta las rutas de Cloud Scheduler, siguiendo los paths reales

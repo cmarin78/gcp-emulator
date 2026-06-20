@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
@@ -261,29 +262,46 @@ func (s *Service) publish(w http.ResponseWriter, r *http.Request, project, topic
 // con el wire format estándar de Pub/Sub push:
 // {"message": {...}, "subscription": "projects/.../subscriptions/..."}.
 func (s *Service) deliverPush(sub Subscription, msg Message) {
+	project := activity.ProjectOf(sub.Name)
 	payload, err := json.Marshal(map[string]any{
 		"message":      msg,
 		"subscription": sub.Name,
 	})
+	status, severity := "ok", "INFO"
 	if err != nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "POST", sub.PushConfig.PushEndpoint, bytes.NewReader(payload))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range sub.PushConfig.Attributes {
-		req.Header.Set(k, v)
-	}
-	if resp, err := s.httpClient.Do(req); err == nil {
-		resp.Body.Close()
+		status, severity = err.Error(), "ERROR"
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		req, rerr := http.NewRequestWithContext(ctx, "POST", sub.PushConfig.PushEndpoint, bytes.NewReader(payload))
+		if rerr != nil {
+			status, severity = rerr.Error(), "ERROR"
+		} else {
+			req.Header.Set("Content-Type", "application/json")
+			for k, v := range sub.PushConfig.Attributes {
+				req.Header.Set(k, v)
+			}
+			if resp, derr := s.httpClient.Do(req); derr == nil {
+				resp.Body.Close()
+				if resp.StatusCode >= 400 {
+					status, severity = fmt.Sprintf("http %d", resp.StatusCode), "ERROR"
+				}
+			} else {
+				status, severity = derr.Error(), "ERROR"
+			}
+		}
 	}
 	// Sin reintentos ni dead-lettering: si el endpoint falla, el mensaje se
 	// pierde (a diferencia de la API real). Documentado como límite en el
 	// ROADMAP — agregar retry/backoff queda para una próxima iteración.
+
+	activity.RecordLog(project, activity.LogEntry{
+		LogName:     fmt.Sprintf("projects/%s/logs/pubsub.googleapis.com%%2Fdeliveries", project),
+		Severity:    severity,
+		TextPayload: fmt.Sprintf("push delivery to %s for %s: %s", sub.PushConfig.PushEndpoint, sub.Name, status),
+		Resource:    map[string]any{"type": "pubsub_subscription", "labels": map[string]string{"subscription_id": sub.Name}},
+	})
+	activity.IncrCounter(project, "pubsub.googleapis.com/subscription/push_request_count", map[string]string{"subscription_id": sub.Name})
 }
 
 func (s *Service) createSubscription(w http.ResponseWriter, r *http.Request) {
