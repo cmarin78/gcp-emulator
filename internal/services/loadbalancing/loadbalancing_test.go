@@ -97,6 +97,52 @@ func TestBackendServiceSecurityPolicyRef(t *testing.T) {
 	}
 }
 
+// TestBackendServiceCDN covers Cloud CDN's enableCDN/cdnPolicy fields:
+// insert with enableCDN=true applies a default cdnPolicy, patch can
+// override the policy or disable CDN (clearing the policy).
+func TestBackendServiceCDN(t *testing.T) {
+	srv := newTestServer(t)
+
+	var bs BackendService
+	status := testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/global/backendServices", map[string]any{
+		"name":      "cdn-backend",
+		"enableCDN": true,
+	}, &bs)
+	if status != 200 {
+		t.Fatalf("insert: status=%d", status)
+	}
+	var got BackendService
+	testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/global/backendServices/cdn-backend", nil, &got)
+	if !got.EnableCDN || got.CdnPolicy == nil || got.CdnPolicy.CacheMode == "" {
+		t.Fatalf("expected enableCDN with default cdnPolicy applied, got %+v", got)
+	}
+
+	var patchOp Operation
+	status = testutil.DoJSON(t, "PATCH", srv.URL+"/compute/v1/projects/proj1/global/backendServices/cdn-backend", map[string]any{
+		"cdnPolicy": map[string]any{"cacheMode": "FORCE_CACHE_ALL", "defaultTtl": 7200},
+	}, &patchOp)
+	if status != 200 || patchOp.Status != "DONE" || patchOp.OperationType != "patch" {
+		t.Fatalf("patch cdnPolicy: status=%d op=%+v", status, patchOp)
+	}
+	var patched BackendService
+	testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/global/backendServices/cdn-backend", nil, &patched)
+	if patched.CdnPolicy == nil || patched.CdnPolicy.CacheMode != "FORCE_CACHE_ALL" || patched.CdnPolicy.DefaultTTL != 7200 {
+		t.Fatalf("expected cdnPolicy overridden, got %+v", patched.CdnPolicy)
+	}
+
+	status = testutil.DoJSON(t, "PATCH", srv.URL+"/compute/v1/projects/proj1/global/backendServices/cdn-backend", map[string]any{
+		"enableCDN": false,
+	}, nil)
+	if status != 200 {
+		t.Fatalf("patch disable cdn: status=%d", status)
+	}
+	var disabled BackendService
+	testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/global/backendServices/cdn-backend", nil, &disabled)
+	if disabled.EnableCDN || disabled.CdnPolicy != nil {
+		t.Fatalf("expected CDN disabled and cdnPolicy cleared, got %+v", disabled)
+	}
+}
+
 // TestURLMapsAndProxies covers urlMaps, targetHttpProxies and
 // targetHttpsProxies CRUD.
 func TestURLMapsAndProxies(t *testing.T) {

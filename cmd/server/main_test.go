@@ -26,6 +26,8 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/cloudsql"
 	"github.com/cesar/gcp-emulator/internal/services/cloudtasks"
 	"github.com/cesar/gcp-emulator/internal/services/compute"
+	"github.com/cesar/gcp-emulator/internal/services/eventarc"
+	"github.com/cesar/gcp-emulator/internal/services/filestore"
 	"github.com/cesar/gcp-emulator/internal/services/firestore"
 	"github.com/cesar/gcp-emulator/internal/services/gcs"
 	"github.com/cesar/gcp-emulator/internal/services/gke"
@@ -39,6 +41,8 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/resourcemanager"
 	"github.com/cesar/gcp-emulator/internal/services/secretmanager"
 	"github.com/cesar/gcp-emulator/internal/services/spanner"
+	"github.com/cesar/gcp-emulator/internal/services/vpcaccess"
+	"github.com/cesar/gcp-emulator/internal/services/workflows"
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
 
@@ -79,6 +83,10 @@ func TestAllServicesRegisterWithoutPanic(t *testing.T) {
 	memorystore.New(db).Register(mux)
 	spanner.New(db).Register(mux)
 	gke.New(db).Register(mux)
+	vpcaccess.New(db).Register(mux)
+	filestore.New(db).Register(mux)
+	workflows.New(db).Register(mux)
+	eventarc.New(db).Register(mux)
 
 	// A trivial sanity request: the mux should at least be wired up enough
 	// to return *some* response (even a 404) instead of nil-dereferencing.
@@ -95,6 +103,6 @@ type discardResponseWriter struct {
 	status int
 }
 
-func (w *discardResponseWriter) Header() http.Header { return w.header }
+func (w *discardResponseWriter) Header() http.Header         { return w.header }
 func (w *discardResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (w *discardResponseWriter) WriteHeader(status int) { w.status = status }
+func (w *discardResponseWriter) WriteHeader(status int)      { w.status = status }

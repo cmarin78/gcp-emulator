@@ -102,6 +102,9 @@ func (s *Svc) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v2/projects/{project}/locations/{location}/services/{service}", s.getService)
 	mux.HandleFunc("PATCH /v2/projects/{project}/locations/{location}/services/{service}", s.updateService)
 	mux.HandleFunc("DELETE /v2/projects/{project}/locations/{location}/services/{service}", s.deleteService)
+
+	// Fase 9: Cloud Run Jobs (recurso distinto de los servicios de arriba).
+	s.registerJobs(mux)
 }
 
 func serviceName(project, location, service string) string {

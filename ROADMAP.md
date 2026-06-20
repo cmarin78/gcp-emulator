@@ -297,3 +297,70 @@ each of `compute_test.go`, `iam_test.go`, `gcs_test.go`, `pubsub_test.go`,
 `cloudtasks_test.go`, `cloudscheduler_test.go`, and `firestore_test.go` —
 asserting a second create call with the same client-specified ID returns
 409, immediately after a first call that returns 200.
+
+## Phase 9 — Instance management, networking add-ons, serverless glue ✅ completed
+
+All 8 items below are implemented, tested, and verified building/passing on
+a real machine (Go, `go build`/`go vet`/`go test ./...` all clean across
+every package, including `cmd/server`'s full-mux registration test).
+Ordered cheapest/most-self-contained first, same convention as prior
+phases.
+
+| Service | Minimum resources | Depends on | Why | Effort | Status |
+|---|---|---|---|---|---|
+| Compute instance templates | `compute.instanceTemplates` (CRUD, immutable like the real API — no update, only create/delete) | `compute.disks`/`compute.images`/`compute.networks` (already done) | Extremely common in real Terraform (`google_compute_instance_template`); almost always paired with MIGs below. Reuses most of the existing `instances` shape. | S | ✅ |
+| Compute managed instance groups (MIGs) | `compute.instanceGroupManagers`, `compute.autoscalers` (zonal/regional, CRUD, shape-only — no real scaling) | instance templates (above) | The standard way real Terraform deploys fleets of VMs (`google_compute_instance_group_manager`, `google_compute_autoscaler`); a large gap given Compute is otherwise our most complete service. | M | ✅ |
+| Cloud Run Jobs | `/v2/projects/{p}/locations/{l}/jobs` (CRUD + manual `:run`, distinct resource from the already-implemented Cloud Run *services*) | cloudrun package (already done, same patterns) | Batch/one-off workloads are a different Terraform resource (`google_cloud_run_v2_job`) from services; cheap to add given the Cloud Run package already exists as a template. | S | ✅ |
+| Serverless VPC Access connectors | `/v1/projects/{p}/locations/{l}/connectors` (CRUD) | `compute.networks` (already done) | Required by `google_vpc_access_connector`, which Cloud Run/Cloud Functions configs frequently reference for private VPC egress. | S | ✅ |
+| Filestore | `/file/v1/projects/{p}/locations/{l}/instances` (CRUD, NFS shape only) | — | Common pairing with GKE/Compute for shared storage (`google_filestore_instance`); same CRUD-with-Operation pattern as Memorystore/Spanner, cheap to copy. | M | ✅ |
+| Workflows | `/v1/projects/{p}/locations/{l}/workflows` (CRUD, `:execute` no-op) | — | Lightweight orchestration glue increasingly used alongside Cloud Run/Functions/Eventarc; small API surface. | S | ✅ |
+| Eventarc | `/v1/projects/{p}/locations/{l}/triggers` (CRUD, no real event delivery) | pubsub, cloudrun (already done) | Standard event-routing layer wiring Pub/Sub/Cloud Storage events to Cloud Run; rounds out the serverless story. | M | ✅ |
+| Cloud CDN | `cdnPolicy` sub-resource on existing `backendServices` (PATCH only, no new top-level resource) | `loadbalancing.backendServices` (already done) | Trivial extension — a single nested field most `google_compute_backend_service` configs set when fronting static content. | S | ✅ |
+
+As with Phase 8, the instance template/MIG/VPC-connector/Filestore/
+Workflows/Eventarc mutations return their respective `Operation`-shaped
+resource (the simpler `google.longrunning.Operation` shape, same as
+Memorystore/Spanner/GKE/Cloud Build — see Phase 8 notes), resolved
+synchronously; Cloud CDN reuses Load Balancing's `compute`-style Operation
+(`status: DONE`) since it's a field on an existing Compute resource, not a
+new top-level one.
+
+One real bug was found and fixed during this phase's build/test pass (same
+class as the Phase 8 duplicate-route incident, not caught by `go
+build`/`go vet`): Filestore's `instances` resource path
+(`projects/{project}/locations/{location}/instances`) is byte-for-byte
+identical to Memorystore's, so registering both on the shared bare `/v1/*`
+prefix panicked `http.ServeMux` with a duplicate-route error the first
+time `cmd/server`'s full-registration test was updated to actually include
+the four new Phase 9 packages (it hadn't been updated yet when the
+individual per-package tests were first written and passing, which is why
+this stayed invisible until that omission was caught and fixed in the same
+pass). Resolved by mounting Filestore on its own `/file/v1/*` prefix —
+the same disambiguation technique already used for Storage (`/storage/v1/`)
+and Compute (`/compute/v1/`) — rather than the bare `/v1/*` most other
+services share. Point Terraform's `filestore_custom_endpoint` provider
+field at `<emulator>/file/v1/`.
+
+## Phase 10 (proposed, lower priority) — Larger/niche surfaces
+
+Deliberately ordered after Phase 9: each of these has a materially larger
+API surface and/or a narrower audience for a *local* emulator (these
+services' value is usually tied to real managed infrastructure — actual
+GPUs, actual Spark clusters, actual App Engine sandboxing — that a
+shape-only emulator can't meaningfully stand in for beyond satisfying
+`terraform apply`).
+
+| Service | Minimum resources | Why | Effort |
+|---|---|---|---|
+| Vertex AI | `models`, `endpoints` (CRUD, no real inference) | Growing Terraform adoption, but a sprawling API (training, pipelines, feature store) — scoping to just models/endpoints keeps this tractable. | L |
+| App Engine | `applications`, `services`, `versions` (CRUD, no real deploy) | Long-tail demand; declining relative to Cloud Run, but `google_app_engine_application` still appears in legacy IaC. | L |
+| Dataproc | `clusters` (CRUD, shape-only — no real Spark/Hadoop) | Common in data-pipeline Terraform, but a cluster resource alone is a reasonable, bounded slice (vs. modeling jobs/workflows too). | L |
+| Dataflow | `jobs` (create/get/list, status always a fixed terminal state) | Pairs with Dataproc/BigQuery in data pipelines; simpler surface than Dataproc since jobs are mostly fire-and-forget from the API's perspective. | M |
+| Cloud Composer | `environments` (CRUD, shape-only — no real Airflow) | Highest effort-to-value ratio of this batch (environment creation alone is a large, slow-resolving real API); revisit only if there's specific demand. | L |
+
+### Recommendation
+
+Phase 9 is done; Phase 10 remains opportunistic/on-demand rather than
+committed work, given the narrower audience and larger surface of each
+item — revisit only if there's specific demand for Vertex AI, App Engine,
+Dataproc, Dataflow, or Cloud Composer.

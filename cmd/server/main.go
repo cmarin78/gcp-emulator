@@ -22,6 +22,8 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/cloudsql"
 	"github.com/cesar/gcp-emulator/internal/services/cloudtasks"
 	"github.com/cesar/gcp-emulator/internal/services/compute"
+	"github.com/cesar/gcp-emulator/internal/services/eventarc"
+	"github.com/cesar/gcp-emulator/internal/services/filestore"
 	"github.com/cesar/gcp-emulator/internal/services/firestore"
 	"github.com/cesar/gcp-emulator/internal/services/gcs"
 	"github.com/cesar/gcp-emulator/internal/services/gke"
@@ -35,6 +37,8 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/resourcemanager"
 	"github.com/cesar/gcp-emulator/internal/services/secretmanager"
 	"github.com/cesar/gcp-emulator/internal/services/spanner"
+	"github.com/cesar/gcp-emulator/internal/services/vpcaccess"
+	"github.com/cesar/gcp-emulator/internal/services/workflows"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
 
@@ -77,6 +81,10 @@ func main() {
 	memorystore.New(db).Register(mux)
 	spanner.New(db).Register(mux)
 	gke.New(db).Register(mux)
+	vpcaccess.New(db).Register(mux)
+	filestore.New(db).Register(mux)
+	workflows.New(db).Register(mux)
+	eventarc.New(db).Register(mux)
 
 	// Endpoint de salud, útil para chequear que el emulador está arriba.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +97,7 @@ func main() {
 	}
 
 	log.Printf("GCP Emulator escuchando en %s (db=%s, web=%s)", *addr, *dbPath, *staticDir)
-	log.Printf("Endpoints: /storage/v1/*  /compute/v1/* (Compute, Load Balancing, Cloud Armor, routers/routes)  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry, Firestore, KMS, Cloud Scheduler, Cloud Build, Memorystore, Cloud Spanner, GKE)  /v2/* (Cloud Run, Cloud Functions, Logging sinks, Cloud Tasks)  /sql/v1beta4/* (Cloud SQL)  /bigquery/v2/* (BigQuery)  /v3/* (Monitoring alert policies, Resource Manager projects)  /dns/v1/* (Cloud DNS)  /healthz")
+	log.Printf("Endpoints: /storage/v1/*  /compute/v1/* (Compute, instance templates/MIGs/autoscalers, Load Balancing + Cloud CDN, Cloud Armor, routers/routes)  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry, Firestore, KMS, Cloud Scheduler, Cloud Build, Memorystore, Cloud Spanner, GKE, VPC Access connectors, Workflows, Eventarc)  /file/v1/* (Filestore)  /v2/* (Cloud Run services + Jobs, Cloud Functions, Logging sinks, Cloud Tasks)  /sql/v1beta4/* (Cloud SQL)  /bigquery/v2/* (BigQuery)  /v3/* (Monitoring alert policies, Resource Manager projects)  /dns/v1/* (Cloud DNS)  /healthz")
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		log.Fatal(err)
 	}

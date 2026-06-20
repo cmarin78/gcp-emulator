@@ -58,8 +58,11 @@ func TestListZonesAndMachineTypes(t *testing.T) {
 }
 
 // TestInstanceGroupManagersStub asserts both the zonal and aggregated list
-// endpoints always return an empty list -- needed because Terraform's GKE
-// node-pool reader queries this, but this emulator models no real IGMs.
+// endpoints return an empty result for a project with no MIGs. As of Phase
+// 9 the zonal list is real (see TestInstanceGroupManagerAndAutoscalerLifecycle
+// for the populated case); the aggregated/list variant is still a fixed
+// empty-map response (real API shape: items is a scope->ScopedList map, not
+// an array, so an empty map is the correct "no matches" response).
 func TestInstanceGroupManagersStub(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -72,7 +75,7 @@ func TestInstanceGroupManagersStub(t *testing.T) {
 	}
 
 	var agg struct {
-		Items []any `json:"items"`
+		Items map[string]any `json:"items"`
 	}
 	status = testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/aggregated/instanceGroupManagers", nil, &agg)
 	if status != 200 || agg.Items == nil || len(agg.Items) != 0 {
@@ -377,6 +380,9 @@ func TestDuplicateCreateConflicts(t *testing.T) {
 		{"disk", "/compute/v1/projects/proj1/zones/us-central1-a/disks", map[string]any{"name": "dup-disk"}},
 		{"router", "/compute/v1/projects/proj1/regions/us-central1/routers", map[string]any{"name": "dup-router", "network": "default"}},
 		{"route", "/compute/v1/projects/proj1/global/routes", map[string]any{"name": "dup-route", "network": "default", "destRange": "0.0.0.0/0"}},
+		{"instanceTemplate", "/compute/v1/projects/proj1/global/instanceTemplates", map[string]any{"name": "dup-tmpl"}},
+		{"instanceGroupManager", "/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers", map[string]any{"name": "dup-mig", "instanceTemplate": "dup-tmpl"}},
+		{"autoscaler", "/compute/v1/projects/proj1/zones/us-central1-a/autoscalers", map[string]any{"name": "dup-as", "target": "dup-mig"}},
 	}
 
 	for _, c := range cases {
@@ -385,5 +391,134 @@ func TestDuplicateCreateConflicts(t *testing.T) {
 		if status != 409 {
 			t.Fatalf("duplicate %s: want 409, got %d", c.label, status)
 		}
+	}
+}
+
+// TestInstanceTemplateLifecycle covers create -> get -> list -> delete for
+// the immutable instance template resource (no update endpoint, matching
+// the real API).
+func TestInstanceTemplateLifecycle(t *testing.T) {
+	srv := newTestServer(t)
+
+	var op Operation
+	status := testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/global/instanceTemplates", map[string]any{
+		"name": "my-template",
+		"properties": map[string]any{
+			"machineType": "e2-medium",
+			"disks": []map[string]any{
+				{"boot": true, "initializeParams": map[string]any{"sourceImage": "projects/debian-cloud/global/images/family/debian-12"}},
+			},
+		},
+	}, &op)
+	if status != 200 || op.Status != "DONE" || op.OperationType != "insert" {
+		t.Fatalf("insert template: status=%d op=%+v", status, op)
+	}
+
+	var got InstanceTemplate
+	status = testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/global/instanceTemplates/my-template", nil, &got)
+	if status != 200 || got.Properties.MachineType != "e2-medium" {
+		t.Fatalf("get template: status=%d tmpl=%+v", status, got)
+	}
+
+	var list struct {
+		Items []InstanceTemplate `json:"items"`
+	}
+	status = testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/global/instanceTemplates", nil, &list)
+	if status != 200 || len(list.Items) != 1 {
+		t.Fatalf("list templates: status=%d items=%+v", status, list.Items)
+	}
+
+	status = testutil.DoJSON(t, "DELETE", srv.URL+"/compute/v1/projects/proj1/global/instanceTemplates/my-template", nil, nil)
+	if status != 200 {
+		t.Fatalf("delete template: want 200, got %d", status)
+	}
+}
+
+// TestInstanceGroupManagerAndAutoscalerLifecycle covers MIG create -> get ->
+// list -> patch -> resize -> delete, plus a paired autoscaler's create ->
+// get -> patch -> delete -- the standard Terraform fleet-management pairing
+// (google_compute_instance_group_manager + google_compute_autoscaler) that
+// was the single biggest Compute coverage gap before Phase 9.
+func TestInstanceGroupManagerAndAutoscalerLifecycle(t *testing.T) {
+	srv := newTestServer(t)
+
+	testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/global/instanceTemplates", map[string]any{"name": "fleet-template"}, nil)
+
+	var migOp Operation
+	status := testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers", map[string]any{
+		"name":             "my-mig",
+		"instanceTemplate": "fleet-template",
+		"targetSize":       2,
+	}, &migOp)
+	if status != 200 || migOp.Status != "DONE" || migOp.OperationType != "insert" {
+		t.Fatalf("insert mig: status=%d op=%+v", status, migOp)
+	}
+
+	var got InstanceGroupManager
+	status = testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/my-mig", nil, &got)
+	if status != 200 || got.TargetSize != 2 || got.InstanceTemplate == "" {
+		t.Fatalf("get mig: status=%d mig=%+v", status, got)
+	}
+
+	var list struct {
+		Items []InstanceGroupManager `json:"items"`
+	}
+	status = testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers", nil, &list)
+	if status != 200 || len(list.Items) != 1 {
+		t.Fatalf("list migs: status=%d items=%+v", status, list.Items)
+	}
+
+	var patchOp Operation
+	status = testutil.DoJSON(t, "PATCH", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/my-mig", map[string]any{
+		"targetSize": 3,
+	}, &patchOp)
+	if status != 200 || patchOp.Status != "DONE" {
+		t.Fatalf("patch mig: status=%d op=%+v", status, patchOp)
+	}
+
+	status = testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/my-mig/resize?size=5", nil, nil)
+	if status != 200 {
+		t.Fatalf("resize mig: want 200, got %d", status)
+	}
+	var resized InstanceGroupManager
+	testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/my-mig", nil, &resized)
+	if resized.TargetSize != 5 {
+		t.Fatalf("expected targetSize=5 after resize, got %d", resized.TargetSize)
+	}
+
+	var asOp Operation
+	status = testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/autoscalers", map[string]any{
+		"name":   "my-as",
+		"target": "my-mig",
+		"autoscalingPolicy": map[string]any{
+			"minNumReplicas": 1,
+			"maxNumReplicas": 10,
+		},
+	}, &asOp)
+	if status != 200 || asOp.Status != "DONE" {
+		t.Fatalf("insert autoscaler: status=%d op=%+v", status, asOp)
+	}
+
+	var gotAs Autoscaler
+	status = testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/autoscalers/my-as", nil, &gotAs)
+	if status != 200 || gotAs.AutoscalingPolicy.MaxNumReplicas != 10 {
+		t.Fatalf("get autoscaler: status=%d as=%+v", status, gotAs)
+	}
+
+	var patchAsOp Operation
+	status = testutil.DoJSON(t, "PATCH", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/autoscalers/my-as", map[string]any{
+		"autoscalingPolicy": map[string]any{"minNumReplicas": 2, "maxNumReplicas": 20},
+	}, &patchAsOp)
+	if status != 200 || patchAsOp.Status != "DONE" {
+		t.Fatalf("patch autoscaler: status=%d op=%+v", status, patchAsOp)
+	}
+
+	status = testutil.DoJSON(t, "DELETE", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/autoscalers/my-as", nil, nil)
+	if status != 200 {
+		t.Fatalf("delete autoscaler: want 200, got %d", status)
+	}
+	status = testutil.DoJSON(t, "DELETE", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/my-mig", nil, nil)
+	if status != 200 {
+		t.Fatalf("delete mig: want 200, got %d", status)
 	}
 }

@@ -130,17 +130,12 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /compute/v1/projects/{project}/regions/{region}", s.getRegion)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/machineTypes", s.listMachineTypes)
 
-	// instanceGroupManagers: not modeled (this emulator has no real managed
-	// instance group support), but the Terraform google provider's GKE
-	// resource looks these up by filter when reading a cluster's node
-	// pools (to resolve instance group / node count info from the
-	// gke-*-default-pool naming convention). Without a route here, the
-	// shared mux's catch-all 404 returns plain text, which isn't valid
-	// JSON — that breaks the provider's response decoding further up the
-	// call chain. Always answering with an empty list is enough: a zero-
-	// match filtered list is a completely normal, valid response.
-	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/instanceGroupManagers", s.listInstanceGroupManagers)
-	mux.HandleFunc("GET /compute/v1/projects/{project}/aggregated/instanceGroupManagers", s.listInstanceGroupManagers)
+	// instanceGroupManagers: zonal list/get/insert/delete (+ aggregated list)
+	// are now registered by registerInstanceGroups (Fase 9, see
+	// instancegroups.go) below — that file's listInstanceGroupManagers
+	// returns real, persisted MIGs instead of the always-empty stub this
+	// emulator used before Phase 9.
+	mux.HandleFunc("GET /compute/v1/projects/{project}/aggregated/instanceGroupManagers", s.listInstanceGroupManagersAggregated)
 
 	mux.HandleFunc("POST /compute/v1/projects/{project}/zones/{zone}/instances", s.insertInstance)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/zones/{zone}/instances", s.listInstances)
@@ -195,6 +190,10 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/routes", s.listRoutes)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/routes/{route}", s.getRoute)
 	mux.HandleFunc("DELETE /compute/v1/projects/{project}/global/routes/{route}", s.deleteRoute)
+
+	// Fase 9: instance templates + managed instance groups/autoscalers.
+	s.registerInstanceTemplates(mux)
+	s.registerInstanceGroups(mux)
 }
 
 func (s *Service) listZones(w http.ResponseWriter, r *http.Request) {
@@ -240,15 +239,17 @@ func (s *Service) listMachineTypes(w http.ResponseWriter, r *http.Request) {
 	server.WriteJSON(w, 200, map[string]any{"kind": "compute#machineTypeList", "items": items})
 }
 
-// listInstanceGroupManagers always returns an empty list. This emulator
-// doesn't model managed instance groups at all, but the Terraform google
-// provider's GKE cluster resource queries this collection (filtered by the
-// gke-*-default-pool naming convention) while reading back a cluster's node
-// pools. A zero-match filtered list is a completely normal, valid real-API
-// response, so returning one here is enough to satisfy the provider without
-// implementing real instance group support.
-func (s *Service) listInstanceGroupManagers(w http.ResponseWriter, r *http.Request) {
-	server.WriteJSON(w, 200, map[string]any{"kind": "compute#instanceGroupManagerList", "items": []any{}})
+// listInstanceGroupManagersAggregated always returns an empty aggregated
+// list. As of Phase 9 the emulator does model real, zonal
+// instanceGroupManagers (see instancegroups.go), but the aggregated/list
+// variant (used by some clients, e.g. the Terraform google provider's GKE
+// cluster resource when resolving node-pool instance groups across all
+// zones) isn't implemented with real cross-zone aggregation yet. A
+// zero-match filtered list is a completely normal, valid real-API response,
+// so this keeps that lookup from breaking callers without needing real
+// aggregation support.
+func (s *Service) listInstanceGroupManagersAggregated(w http.ResponseWriter, r *http.Request) {
+	server.WriteJSON(w, 200, map[string]any{"kind": "compute#instanceGroupManagerAggregatedList", "items": map[string]any{}})
 }
 
 func instanceKey(zone, name string) string { return zone + "/" + name }

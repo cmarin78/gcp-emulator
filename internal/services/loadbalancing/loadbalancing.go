@@ -51,9 +51,25 @@ type BackendService struct {
 	LoadBalancingScheme string          `json:"loadBalancingScheme,omitempty"`
 	// SecurityPolicy references a Cloud Armor securityPolicy (global
 	// selfLink), same as the real API's google_compute_backend_service.security_policy.
-	SecurityPolicy    string `json:"securityPolicy,omitempty"`
-	CreationTimestamp string `json:"creationTimestamp"`
-	SelfLink          string `json:"selfLink"`
+	SecurityPolicy string `json:"securityPolicy,omitempty"`
+	// EnableCDN / CdnPolicy mirror the real API's Cloud CDN fields on
+	// backendServices (google_compute_backend_service.enable_cdn /
+	// .cdn_policy). No real edge caching happens here — just the resource
+	// shape Terraform/gcloud read back.
+	EnableCDN         bool       `json:"enableCDN,omitempty"`
+	CdnPolicy         *CDNPolicy `json:"cdnPolicy,omitempty"`
+	CreationTimestamp string     `json:"creationTimestamp"`
+	SelfLink          string     `json:"selfLink"`
+}
+
+// CDNPolicy mirrors compute#BackendServiceCdnPolicy (the relevant subset).
+type CDNPolicy struct {
+	CacheMode       string          `json:"cacheMode,omitempty"`
+	DefaultTTL      int64           `json:"defaultTtl,omitempty"`
+	ClientTTL       int64           `json:"clientTtl,omitempty"`
+	MaxTTL          int64           `json:"maxTtl,omitempty"`
+	NegativeCaching bool            `json:"negativeCaching,omitempty"`
+	CacheKeyPolicy  json.RawMessage `json:"cacheKeyPolicy,omitempty"`
 }
 
 type URLMap struct {
@@ -136,6 +152,7 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /compute/v1/projects/{project}/global/backendServices", s.insertBackendService)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/backendServices", s.listBackendServices)
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/backendServices/{backendService}", s.getBackendService)
+	mux.HandleFunc("PATCH /compute/v1/projects/{project}/global/backendServices/{backendService}", s.patchBackendService)
 	mux.HandleFunc("DELETE /compute/v1/projects/{project}/global/backendServices/{backendService}", s.deleteBackendService)
 
 	mux.HandleFunc("POST /compute/v1/projects/{project}/global/urlMaps", s.insertURLMap)
@@ -267,6 +284,8 @@ func (s *Service) insertBackendService(w http.ResponseWriter, r *http.Request) {
 		Backends            json.RawMessage `json:"backends"`
 		LoadBalancingScheme string          `json:"loadBalancingScheme"`
 		SecurityPolicy      string          `json:"securityPolicy"`
+		EnableCDN           bool            `json:"enableCDN"`
+		CdnPolicy           *CDNPolicy      `json:"cdnPolicy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
@@ -286,6 +305,12 @@ func (s *Service) insertBackendService(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 409, "ALREADY_EXISTS", "backend service ya existe: "+body.Name)
 		return
 	}
+	cdnPolicy := body.CdnPolicy
+	if body.EnableCDN && cdnPolicy == nil {
+		// El API real aplica una cdnPolicy por defecto cuando enableCDN=true
+		// y el caller no manda una explícita.
+		cdnPolicy = &CDNPolicy{CacheMode: "CACHE_ALL_STATIC", DefaultTTL: 3600, ClientTTL: 3600, MaxTTL: 86400}
+	}
 	bs := BackendService{
 		ID:                  fmt.Sprintf("%d", s.nextSeq()),
 		Name:                body.Name,
@@ -296,6 +321,8 @@ func (s *Service) insertBackendService(w http.ResponseWriter, r *http.Request) {
 		Backends:            body.Backends,
 		LoadBalancingScheme: body.LoadBalancingScheme,
 		SecurityPolicy:      normalizeSecurityPolicyRef(project, body.SecurityPolicy),
+		EnableCDN:           body.EnableCDN,
+		CdnPolicy:           cdnPolicy,
 		CreationTimestamp:   time.Now().UTC().Format(time.RFC3339),
 		SelfLink:            selfLink(project, "backendServices", body.Name),
 	}
@@ -332,6 +359,78 @@ func (s *Service) getBackendService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	server.WriteJSON(w, 200, bs)
+}
+
+// patchBackendService implementa compute.backendServices.patch, usada
+// principalmente por Terraform/gcloud para activar/ajustar Cloud CDN
+// (enableCDN/cdnPolicy) y la securityPolicy sin recrear el recurso.
+func (s *Service) patchBackendService(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	name := r.PathValue("backendService")
+	var existing BackendService
+	found, err := s.db.Get(bucketBackendServices, name, &existing)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "backend service no encontrado")
+		return
+	}
+	var body struct {
+		Protocol            *string         `json:"protocol"`
+		PortName            *string         `json:"portName"`
+		TimeoutSec          *int64          `json:"timeoutSec"`
+		HealthChecks        []string        `json:"healthChecks"`
+		Backends            json.RawMessage `json:"backends"`
+		LoadBalancingScheme *string         `json:"loadBalancingScheme"`
+		SecurityPolicy      *string         `json:"securityPolicy"`
+		EnableCDN           *bool           `json:"enableCDN"`
+		CdnPolicy           *CDNPolicy      `json:"cdnPolicy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if body.Protocol != nil {
+		existing.Protocol = *body.Protocol
+	}
+	if body.PortName != nil {
+		existing.PortName = *body.PortName
+	}
+	if body.TimeoutSec != nil {
+		existing.TimeoutSec = *body.TimeoutSec
+	}
+	if body.HealthChecks != nil {
+		existing.HealthChecks = body.HealthChecks
+	}
+	if body.Backends != nil {
+		existing.Backends = body.Backends
+	}
+	if body.LoadBalancingScheme != nil {
+		existing.LoadBalancingScheme = *body.LoadBalancingScheme
+	}
+	if body.SecurityPolicy != nil {
+		existing.SecurityPolicy = normalizeSecurityPolicyRef(project, *body.SecurityPolicy)
+	}
+	if body.EnableCDN != nil {
+		existing.EnableCDN = *body.EnableCDN
+		if existing.EnableCDN && existing.CdnPolicy == nil && body.CdnPolicy == nil {
+			existing.CdnPolicy = &CDNPolicy{CacheMode: "CACHE_ALL_STATIC", DefaultTTL: 3600, ClientTTL: 3600, MaxTTL: 86400}
+		}
+		if !existing.EnableCDN {
+			existing.CdnPolicy = nil
+		}
+	}
+	if body.CdnPolicy != nil {
+		existing.CdnPolicy = body.CdnPolicy
+	}
+	if err := s.db.Put(bucketBackendServices, existing.Name, existing); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	op := s.ops.Done("patch", existing.SelfLink, opsCollection(r, project))
+	server.WriteJSON(w, 200, op)
 }
 
 func (s *Service) deleteBackendService(w http.ResponseWriter, r *http.Request) {
