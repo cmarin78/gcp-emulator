@@ -387,14 +387,167 @@ decode untouched on the reused variable. The `removePeering` handler itself
 was correct throughout. Fixed by decoding the second `GET` into a fresh
 variable.
 
-### Phase 11 (proposed, lower priority) — Larger/niche surfaces
+### Phase 11 — Behavioral logic layer (proposed)
 
-Deliberately ordered after Phase 10: each of these has a materially larger
-API surface and/or a narrower audience for a *local* emulator (these
-services' value is usually tied to real managed infrastructure — actual
-GPUs, actual Spark clusters, actual App Engine sandboxing — that a
-shape-only emulator can't meaningfully stand in for beyond satisfying
-`terraform apply`).
+Everything through Phase 10 is "shape-compatible, not behavior-complete":
+resources are stored and returned correctly, but the emulator doesn't
+*act* on them. Phase 11 closes part of that gap without adding any new
+runtime dependency — pure Go logic over data already in BoltDB, the same
+spirit as how tools like Packet Tracer or GNS3 simulate protocol behavior
+without real hardware.
+
+| Area | Behavior added |
+|---|---|
+| IAM / Org Policy | Enforcement middleware — requests actually get rejected when a policy/role would deny them, instead of every request silently succeeding. |
+| Networking | Real reachability evaluation across firewalls/peerings/routes (a `testIamPermissions`-style "can A reach B" trace), plus real DNS resolution for Cloud DNS zones. |
+| Pub/Sub, Scheduler, Tasks, Eventarc | Real delivery — push subscriptions, cron fires, task dispatch, and CloudEvent delivery all become genuine outbound HTTP calls on schedule/trigger, not just state transitions. |
+| Workflows | A real interpreter for the basic Workflows syntax (steps, conditionals, calls) instead of a fixed terminal status. |
+| Cloud Armor / Load Balancing | Real rule evaluation against simulated request attributes. |
+| Autoscaler, Billing Budgets | Real math — instance-group scaling decisions and budget accrual computed from actual usage signals instead of being static. |
+| Logging / Monitoring | Populated from the internal events all of the above now generate, instead of being empty stubs. |
+
+This phase has no Docker/engine dependency and keeps the project's
+"single portable binary" property intact — it's a pure complexity/effort
+question, not an architecture question.
+
+### Phase 12 — Pluggable real-execution foundation (proposed)
+
+The foundation that Phases 13+ (real compute, real SQL, real network
+traffic) build on. This phase itself doesn't add any user-visible real
+backend — it adds the mechanism so that later phases can, without making
+Docker a hard dependency of the project.
+
+- **Backend interface.** Every service that gets a "real" tier implements
+  it as a second `Backend` behind the same interface as today's
+  shape/logic backend, selected per-resource rather than globally.
+- **Per-resource opt-in.** Real execution is requested at creation time
+  (e.g. a `backend=real` query param, or a label such as
+  `emulator.dev/backend: real` in the resource body). Omitting it keeps
+  today's zero-cost shape-only behavior — nothing changes for existing
+  users unless they explicitly ask for "real" on a specific resource.
+- **Docker/engine detection with fallback.** At startup, and again per
+  opt-in request, the emulator probes for Docker (and any other required
+  engine). If it's missing, the request falls back to shape-only and the
+  response says so explicitly — it never fails silently and never makes
+  Docker mandatory for the project as a whole.
+- **Resource governor, budget-based rather than a flat count.** A flat
+  "max N backends" cap doesn't reflect reality — a real SQL Server
+  container costs roughly 15x what an embedded Postgres does, so capping
+  by *count* either starves the cheap case or overcommits on the
+  expensive one. Instead:
+  - Each backend type declares an estimated footprint (rough RAM, e.g.
+    Postgres embedded ~150MB, generic `docker run` ~100-300MB depending
+    on the image, MySQL/SQL Server containers ~300MB/~2GB, a k3d/kind
+    cluster ~1.5GB).
+  - At startup the emulator detects host RAM (and, when Docker is
+    present, Docker's own configured memory limit — Docker Desktop on
+    Mac/Windows caps itself independently of the host) and derives a
+    working budget (a conservative fraction of the smaller of the two,
+    leaving headroom for the host OS and whatever else is running).
+  - Admission is budget-aware: a new opt-in request is granted if it
+    fits in the remaining budget. If it doesn't fit, the governor first
+    evicts the least-recently-used *idle* real backend(s) to make room
+    (mirroring testcontainers' reaper / LocalStack's container
+    reuse/eviction) before falling back to shape-only — so a laptop
+    under light use can run more real backends, and one under pressure
+    automatically narrows down, without the user tuning anything.
+  - The idle timeout itself scales with budget pressure (shorter when
+    near the limit, longer when there's slack) instead of being one
+    fixed number.
+  - A small introspection endpoint (e.g. `/admin/real-backends`) exposes
+    current budget usage and active backends, so the adaptive behavior
+    is visible rather than a black box.
+  - All of this stays a sane default; `EMULATOR_MAX_REAL_BACKENDS` (or
+    an explicit RAM ceiling) remains available as a manual override for
+    anyone who wants to hard-cap it instead of trusting auto-detection.
+- **Note:** within the committed scope below, every real backend has a
+  no-Docker fallback (Postgres is embeddable outright). Flavors that have
+  no embeddable option at all (MySQL/SQL Server real engines) are exactly
+  why they're deferred rather than committed — see "Real-execution:
+  committed scope" below.
+
+### Real-execution: committed scope (proposed)
+
+Reduced from the original three-tier plan after weighing it against what
+LocalStack — with a funded team and a decade of work — actually chose to
+build real engines for, versus what it deliberately left as shape-only
+because dedicated tools already cover it better. Two items clear that
+bar: each is the literal use case of "run what the user's resource
+already points to," not a reimplementation of something better served by
+an existing standalone tool.
+
+- **Cloud Run / Cloud Functions:** real `docker run` execution of the
+  user-supplied image, fronted by a reverse proxy. This is the #1 local
+  IaC pain point (does my image actually start and respond?) and no
+  standalone tool solves it in the context of a Terraform-provisioned
+  resource the way the emulator can.
+- **Cloud SQL (Postgres only):** a real embedded Postgres binary, no
+  container. Cheap, no Docker required, and lets queries against a
+  Terraform-provisioned instance actually return real results.
+- **Monitoring / Logging real metrics:** fed from whatever the two items
+  above are actually doing (Docker Stats API, Postgres query stats),
+  replacing today's empty `timeSeries` stub.
+
+MySQL/SQL Server real engines are intentionally *not* committed here:
+when a developer needs a real MySQL or SQL Server to test against, the
+better tool is testcontainers (or `docker run` directly) — bolting that
+inside the emulator adds a maintenance-heavy wrapper around something
+that already works well standalone, for a use case where realism is
+about the engine itself, not about "what the Terraform resource points
+to." If demand shows up for it, it slots into Phase 12's `Backend`
+interface the same way Postgres did — it's deferred, not designed-out.
+
+### Decoupled add-on: network fabric, mini-routers, and GKE/k3d (proposed)
+
+These are the most expensive, most fragile-across-environments items
+from the original plan (Docker networks, generated iptables/nftables
+rules, "mini-router" containers, a k3d/kind-backed GKE). They're
+genuinely interesting, but committing to them now risks the classic
+"half-maintained reimplementation of an existing tool" outcome. So they
+move out of the committed roadmap and into an explicit **optional
+add-on**, with a hard design constraint:
+
+- **The core emulator must never import this code.** It lives in its own
+  Go module/package tree (e.g. `addons/realnet/`, `addons/realgke/`),
+  built only behind its own build tag or as a fully separate companion
+  binary — not linked into `cmd/server`.
+- **Discovery, not dependency.** The core registers an extension point
+  (a small local HTTP/gRPC hook a companion process can attach to,
+  similar to how `kubectl` or `docker-compose` plugins attach) rather
+  than calling into add-on code directly. If the add-on binary isn't
+  present or isn't running, the core behaves exactly as it does today —
+  no missing-symbol errors, no degraded core behavior, no required
+  changes to existing services.
+- **Independent versioning and lifecycle.** The add-on can be built,
+  shipped, and iterated on its own schedule without ever requiring a
+  release of the core emulator, and vice versa.
+- **Promotion path, not a promise.** If/when there's concrete demand and
+  the add-on proves stable, *then* it's a candidate for folding into the
+  core's committed scope — but it starts and stays a puzzle piece that
+  can be missing without anything breaking.
+
+### Recommendation
+
+Phase 9 and Phase 10 are both done. Phase 11 (behavioral logic) is the
+highest-value, lowest-risk next step — no new dependency, broadly
+reusable. Phase 12 (foundation) plus the committed real-execution scope
+(Cloud Run/Functions real containers, Cloud SQL Postgres real, metrics
+fed from both) is the next tier after that. The network/mini-router and
+GKE/k3d add-on is explicitly decoupled — build it opportunistically as a
+separate plug-in piece, never as a dependency the core relies on. MySQL
+and SQL Server real engines stay deferred to "if there's concrete
+demand," using testcontainers/`docker run` directly as the recommended
+interim answer. The pre-existing "larger/niche surfaces" backlog below
+is unrelated to this real-execution work and remains separately
+prioritized.
+
+### Backlog (proposed, lower priority) — Larger/niche surfaces
+
+Each of these has a materially larger API surface and/or a narrower
+audience for a *local* emulator (these services' value is usually tied to
+real managed infrastructure — actual GPUs, actual Spark clusters, actual
+App Engine sandboxing — that a shape-only emulator can't meaningfully
+stand in for beyond satisfying `terraform apply`).
 
 | Service | Minimum resources | Why | Effort |
 |---|---|---|---|
@@ -403,9 +556,3 @@ shape-only emulator can't meaningfully stand in for beyond satisfying
 | Dataproc | `clusters` (CRUD, shape-only — no real Spark/Hadoop) | Common in data-pipeline Terraform, but a cluster resource alone is a reasonable, bounded slice (vs. modeling jobs/workflows too). | L |
 | Dataflow | `jobs` (create/get/list, status always a fixed terminal state) | Pairs with Dataproc/BigQuery in data pipelines; simpler surface than Dataproc since jobs are mostly fire-and-forget from the API's perspective. | M |
 | Cloud Composer | `environments` (CRUD, shape-only — no real Airflow) | Highest effort-to-value ratio of this batch (environment creation alone is a large, slow-resolving real API); revisit only if there's specific demand. | L |
-
-### Recommendation
-
-Phase 9 and Phase 10 are both done. Treat Phase 11 as opportunistic/
-on-demand rather than committed work, given the narrower audience and
-larger surface of each item.
