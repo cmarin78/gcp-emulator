@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -54,6 +55,94 @@ type Autoscaler struct {
 
 func migKey(zone, name string) string        { return zone + "/" + name }
 func autoscalerKey(zone, name string) string { return zone + "/" + name }
+
+// migNameFromTarget extrae el nombre del instance group manager de un
+// autoscaler.target (".../instanceGroupManagers/{name}", absoluto o
+// relativo) -- usado para encontrar el MIG real al que un autoscaler está
+// atado, en vez de tratar autoscalingPolicy como metadata decorativa.
+func migNameFromTarget(target string) string {
+	const marker = "/instanceGroupManagers/"
+	if idx := strings.Index(target, marker); idx >= 0 {
+		return target[idx+len(marker):]
+	}
+	// target sin el marcador "/instanceGroupManagers/" -- algunos clientes
+	// (y el test de este paquete) mandan solo el nombre del MIG en vez de
+	// una referencia completa; tratamos el último segmento de path (o el
+	// string entero si no tiene barras) como el nombre.
+	if idx := strings.LastIndexByte(target, '/'); idx >= 0 {
+		return target[idx+1:]
+	}
+	return target
+}
+
+// clampToAutoscalerPolicy aplica los límites min/maxNumReplicas de una
+// autoscaling policy sobre un tamaño propuesto. Un límite en cero (su valor
+// por defecto si el cliente no lo seteó) se ignora, igual que la API real
+// solo aplica los límites que el cliente configuró explícitamente.
+func clampToAutoscalerPolicy(size int64, p AutoscalerPolicy) int64 {
+	if p.MinNumReplicas > 0 && size < p.MinNumReplicas {
+		size = p.MinNumReplicas
+	}
+	if p.MaxNumReplicas > 0 && size > p.MaxNumReplicas {
+		size = p.MaxNumReplicas
+	}
+	return size
+}
+
+// findAutoscalerForTarget busca, entre los autoscalers de una zona, el que
+// apunta al instance group manager dado. Esto es lo que cierra la brecha de
+// Fase 11 para este recurso: antes, autoscalingPolicy.min/maxNumReplicas se
+// guardaba pero nunca afectaba targetSize del MIG; ahora cualquier resize o
+// patch real queda sujeto a esos límites.
+func (s *Service) findAutoscalerForTarget(zone, migName string) (Autoscaler, bool) {
+	var found Autoscaler
+	ok := false
+	_ = s.db.List(bucketAutoscalers, zone+"/", func(key string, raw []byte) error {
+		var as Autoscaler
+		if err := json.Unmarshal(raw, &as); err != nil {
+			return nil
+		}
+		if migNameFromTarget(as.Target) == migName {
+			found, ok = as, true
+		}
+		return nil
+	})
+	return found, ok
+}
+
+// reconcileMIGSize aplica (si existe) el clamp del autoscaler atado a mig
+// sobre un targetSize propuesto por el cliente (vía PATCH o resize), y deja
+// el resultado en mig.TargetSize para que el caller lo persista.
+func (s *Service) reconcileMIGSize(zone string, mig *InstanceGroupManager, proposed int64) {
+	size := proposed
+	if as, ok := s.findAutoscalerForTarget(zone, mig.Name); ok {
+		size = clampToAutoscalerPolicy(size, as.AutoscalingPolicy)
+	}
+	mig.TargetSize = size
+}
+
+// reconcileAttachedMIG vuelve a aplicar los límites min/maxNumReplicas de un
+// autoscaler sobre el targetSize actual de su MIG, persistiendo el cambio si
+// corresponde. Se llama al crear o modificar un autoscaler, para que tenga
+// un efecto real e inmediato sobre el grupo en vez de esperar al próximo
+// resize manual (p.ej. bajar maxNumReplicas por debajo del tamaño actual
+// debe achicar el grupo de verdad).
+func (s *Service) reconcileAttachedMIG(zone string, as Autoscaler) {
+	migName := migNameFromTarget(as.Target)
+	if migName == "" {
+		return
+	}
+	var mig InstanceGroupManager
+	found, err := s.db.Get(bucketInstanceGroupManagers, migKey(zone, migName), &mig)
+	if err != nil || !found {
+		return
+	}
+	clamped := clampToAutoscalerPolicy(mig.TargetSize, as.AutoscalingPolicy)
+	if clamped != mig.TargetSize {
+		mig.TargetSize = clamped
+		_ = s.db.Put(bucketInstanceGroupManagers, migKey(zone, migName), mig)
+	}
+}
 
 func (s *Service) registerInstanceGroups(mux *http.ServeMux) {
 	mux.HandleFunc("POST /compute/v1/projects/{project}/zones/{zone}/instanceGroupManagers", s.insertInstanceGroupManager)
@@ -174,7 +263,7 @@ func (s *Service) patchInstanceGroupManager(w http.ResponseWriter, r *http.Reque
 		mig.InstanceTemplate = normalizeGlobalRef(project, "instanceTemplates", body.InstanceTemplate)
 	}
 	if body.TargetSize != nil {
-		mig.TargetSize = *body.TargetSize
+		s.reconcileMIGSize(zone, &mig, *body.TargetSize)
 	}
 	if err := s.db.Put(bucketInstanceGroupManagers, migKey(zone, name), mig); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
@@ -200,7 +289,7 @@ func (s *Service) resizeInstanceGroupManager(w http.ResponseWriter, r *http.Requ
 	}
 	size, err := parseQueryInt(r, "size")
 	if err == nil {
-		mig.TargetSize = size
+		s.reconcileMIGSize(zone, &mig, size)
 	}
 	if err := s.db.Put(bucketInstanceGroupManagers, migKey(zone, name), mig); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
@@ -262,6 +351,7 @@ func (s *Service) insertAutoscaler(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+	s.reconcileAttachedMIG(zone, as)
 	op := s.ops.DoneZonal("insert", as.SelfLink, fmt.Sprintf("%s/projects/%s/zones/%s/operations", opsBase(r), project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }
@@ -323,6 +413,7 @@ func (s *Service) patchAutoscaler(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+	s.reconcileAttachedMIG(zone, as)
 	op := s.ops.DoneZonal("patch", as.SelfLink, fmt.Sprintf("%s/projects/%s/zones/%s/operations", opsBase(r), project, zone), zonePath(project, zone))
 	server.WriteJSON(w, 200, op)
 }

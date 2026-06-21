@@ -1,16 +1,18 @@
 // Package billingbudgets emulates a subset of the Cloud Billing Budget API
 // (billingbudgets.googleapis.com/v1): budgets scoped to a billing account
 // (google_billing_budget in Terraform). Budget CRUD is synchronous in the
-// real API (no Operation wrapper), and this emulator never evaluates spend
-// against a budget's threshold rules or sends any notification -- it only
-// persists the resource shape, same "shape-compatible, not
-// behavior-complete" approach used elsewhere.
+// real API (no Operation wrapper). As of Phase 11, getBudget/listBudgets
+// also estimate real spend from actual Compute usage in the budget's
+// filtered projects and emit a real Cloud Logging entry the first time a
+// thresholdRule is crossed -- see spend.go -- instead of ThresholdRules
+// being metadata that's never evaluated.
 package billingbudgets
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
@@ -56,6 +58,14 @@ type Budget struct {
 type Service struct {
 	db  *storage.DB
 	seq int64
+
+	// mu/notified track which (budget, thresholdPercent) pairs have already
+	// produced a Cloud Logging entry, so re-evaluating spend on every
+	// get/list doesn't spam a new log line each time -- in-memory only,
+	// same tradeoff internal/activity already accepts elsewhere in this
+	// phase (no persistence across a restart).
+	mu       sync.Mutex
+	notified map[string]map[float64]bool
 }
 
 func New(db *storage.DB) *Service { return &Service{db: db} }
@@ -110,6 +120,7 @@ func (s *Service) listBudgets(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(raw, &b); err != nil {
 			return err
 		}
+		s.evaluateSpend(key, b)
 		items = append(items, b)
 		return nil
 	})
@@ -133,6 +144,7 @@ func (s *Service) getBudget(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 404, "NOT_FOUND", "budget not found")
 		return
 	}
+	s.evaluateSpend(budgetKey(account, budgetID), b)
 	server.WriteJSON(w, 200, b)
 }
 

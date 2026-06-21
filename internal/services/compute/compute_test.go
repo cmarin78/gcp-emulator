@@ -610,3 +610,71 @@ func TestInstanceGroupManagerAndAutoscalerLifecycle(t *testing.T) {
 		t.Fatalf("delete mig: want 200, got %d", status)
 	}
 }
+
+// TestAutoscalerClampsRealTargetSize covers the Phase 11 behavior added to
+// instancegroups.go: an autoscaler's min/maxNumReplicas now has a real,
+// immediate effect on its target MIG's targetSize instead of being stored
+// as decorative metadata. It covers three angles: attaching an autoscaler
+// to an already-oversized MIG shrinks it immediately; a later resize past
+// the bounds gets clamped instead of accepted as-is; and tightening the
+// policy via PATCH shrinks the group again without a manual resize.
+func TestAutoscalerClampsRealTargetSize(t *testing.T) {
+	srv := newTestServer(t)
+
+	testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/global/instanceTemplates", map[string]any{"name": "tmpl"}, nil)
+	testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers", map[string]any{
+		"name":             "clamp-mig",
+		"instanceTemplate": "tmpl",
+		"targetSize":       8,
+	}, nil)
+
+	// Atar un autoscaler con max=5 a un MIG que ya está en 8 debe achicarlo
+	// de verdad, ahí mismo, en vez de dejarlo como estaba hasta el próximo
+	// resize manual.
+	status := testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/autoscalers", map[string]any{
+		"name":   "clamp-as",
+		"target": "clamp-mig",
+		"autoscalingPolicy": map[string]any{
+			"minNumReplicas": 2,
+			"maxNumReplicas": 5,
+		},
+	}, nil)
+	if status != 200 {
+		t.Fatalf("insert autoscaler: want 200, got %d", status)
+	}
+	var afterAttach InstanceGroupManager
+	testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/clamp-mig", nil, &afterAttach)
+	if afterAttach.TargetSize != 5 {
+		t.Fatalf("expected targetSize clamped to 5 right after attaching autoscaler, got %d", afterAttach.TargetSize)
+	}
+
+	// Un resize pidiendo 20 (por encima de max=5) debe quedar clamped a 5.
+	testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/clamp-mig/resize?size=20", nil, nil)
+	var afterResize InstanceGroupManager
+	testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/clamp-mig", nil, &afterResize)
+	if afterResize.TargetSize != 5 {
+		t.Fatalf("expected resize above max clamped to 5, got %d", afterResize.TargetSize)
+	}
+
+	// Un resize pidiendo 1 (por debajo de min=2) debe quedar clamped a 2.
+	testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/clamp-mig/resize?size=1", nil, nil)
+	var afterLowResize InstanceGroupManager
+	testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/clamp-mig", nil, &afterLowResize)
+	if afterLowResize.TargetSize != 2 {
+		t.Fatalf("expected resize below min clamped to 2, got %d", afterLowResize.TargetSize)
+	}
+
+	// Subir max a 4 (por debajo del tamaño actual, 2, no cambia nada) y
+	// luego a un escenario donde el tamaño actual queda fuera de rango:
+	// bajar max por debajo del tamaño actual debe achicar el grupo de
+	// verdad vía PATCH del autoscaler, sin un resize manual.
+	testutil.DoJSON(t, "POST", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/clamp-mig/resize?size=4", nil, nil)
+	testutil.DoJSON(t, "PATCH", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/autoscalers/clamp-as", map[string]any{
+		"autoscalingPolicy": map[string]any{"minNumReplicas": 1, "maxNumReplicas": 3},
+	}, nil)
+	var afterPatch InstanceGroupManager
+	testutil.DoJSON(t, "GET", srv.URL+"/compute/v1/projects/proj1/zones/us-central1-a/instanceGroupManagers/clamp-mig", nil, &afterPatch)
+	if afterPatch.TargetSize != 3 {
+		t.Fatalf("expected targetSize shrunk to 3 after lowering max via PATCH, got %d", afterPatch.TargetSize)
+	}
+}
