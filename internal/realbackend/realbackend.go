@@ -70,12 +70,41 @@ type Governor struct {
 	mu       sync.Mutex
 	budgetMB int
 	backends map[string]*managedBackend
+	onEvict  func(id string)
 }
 
 // NewGovernor creates a Governor with the given RAM budget in MB. Use
 // DetectBudgetMB to derive a sane default from the host.
 func NewGovernor(budgetMB int) *Governor {
 	return &Governor{budgetMB: budgetMB, backends: map[string]*managedBackend{}}
+}
+
+// SetOnEvict registers a callback invoked, outside the Governor's lock,
+// every time a backend is evicted (by Admit's budget-driven eviction) or
+// removed (by an explicit Release). Phase 13+ backends that keep their
+// own side-table of admitted backends (e.g. cloudsql keeps a map from
+// governor ID to its live *postgres.Backend, so it knows which engine to
+// route a CREATE DATABASE/ROLE statement to) should register this to
+// stay in sync rather than risk talking to a backend the Governor already
+// stopped. Safe to call with nil to clear it.
+//
+// Known limitation, deliberately not solved here: only one callback is
+// supported, registered once. Fine while cloudsql is the only real-backend
+// consumer; revisit (e.g. a slice of callbacks) if/when a second one
+// (Cloud Run/Functions via Docker) needs its own.
+func (g *Governor) SetOnEvict(fn func(id string)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.onEvict = fn
+}
+
+func notifyEvicted(fn func(id string), ids []string) {
+	if fn == nil {
+		return
+	}
+	for _, id := range ids {
+		fn(id)
+	}
 }
 
 func (g *Governor) usedMBLocked() int {
@@ -94,19 +123,23 @@ func (g *Governor) usedMBLocked() int {
 // (no amount of evicting other backends would ever make room for it).
 func (g *Governor) Admit(id string, backend Backend) (admitted bool, evictedIDs []string) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 
 	footprint := backend.FootprintMB()
 	if footprint > g.budgetMB {
+		g.mu.Unlock()
 		return false, nil
 	}
 	if _, exists := g.backends[id]; exists {
+		g.mu.Unlock()
 		return false, nil
 	}
 
 	for g.usedMBLocked()+footprint > g.budgetMB {
 		victim := g.oldestIDLocked()
 		if victim == "" {
+			fn := g.onEvict
+			g.mu.Unlock()
+			notifyEvicted(fn, evictedIDs)
 			return false, evictedIDs
 		}
 		g.evictLocked(victim)
@@ -114,6 +147,9 @@ func (g *Governor) Admit(id string, backend Backend) (admitted bool, evictedIDs 
 	}
 
 	g.backends[id] = &managedBackend{id: id, backend: backend, footprint: footprint, lastUsed: time.Now()}
+	fn := g.onEvict
+	g.mu.Unlock()
+	notifyEvicted(fn, evictedIDs)
 	return true, evictedIDs
 }
 
@@ -141,9 +177,14 @@ func (g *Governor) evictLocked(id string) {
 // when the resource the backend was serving is itself deleted.
 func (g *Governor) Release(id string) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	if _, ok := g.backends[id]; ok {
+	_, ok := g.backends[id]
+	if ok {
 		g.evictLocked(id)
+	}
+	fn := g.onEvict
+	g.mu.Unlock()
+	if ok {
+		notifyEvicted(fn, []string{id})
 	}
 }
 

@@ -12,7 +12,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	db := testutil.NewDB(t)
 	mux := http.NewServeMux()
-	New(db).Register(mux)
+	New(db, nil).Register(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv

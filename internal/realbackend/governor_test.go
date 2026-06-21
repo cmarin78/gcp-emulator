@@ -131,6 +131,32 @@ func TestIdleTimeoutScalesWithPressure(t *testing.T) {
 	}
 }
 
+func TestSetOnEvictNotifiesOnEvictionAndRelease(t *testing.T) {
+	g := NewGovernor(300)
+	var notified []string
+	g.SetOnEvict(func(id string) { notified = append(notified, id) })
+
+	first := &fakeBackend{kind: "x", footprint: 200}
+	second := &fakeBackend{kind: "y", footprint: 200}
+	g.Admit("first", first)
+	time.Sleep(2 * time.Millisecond)
+
+	// Admitting "second" forces a budget-driven eviction of "first".
+	admitted, evicted := g.Admit("second", second)
+	if !admitted || len(evicted) != 1 || evicted[0] != "first" {
+		t.Fatalf("admit second: admitted=%v evicted=%v", admitted, evicted)
+	}
+	if len(notified) != 1 || notified[0] != "first" {
+		t.Fatalf("expected onEvict to fire once for the budget-driven eviction, got %v", notified)
+	}
+
+	// Releasing "second" explicitly should also notify.
+	g.Release("second")
+	if len(notified) != 2 || notified[1] != "second" {
+		t.Fatalf("expected onEvict to fire for Release too, got %v", notified)
+	}
+}
+
 func TestSnapshotBackendsNeverNil(t *testing.T) {
 	g := NewGovernor(100)
 	snap := g.Snapshot()

@@ -73,7 +73,7 @@ func TestAllServicesRegisterWithoutPanic(t *testing.T) {
 	cloudrun.New(db).Register(mux)
 	cloudfunctions.New(db).Register(mux)
 	server.RegisterV2Operations(mux)
-	cloudsql.New(db).Register(mux)
+	cloudsql.New(db, nil).Register(mux)
 	firestore.New(db).Register(mux)
 	bigquery.New(db).Register(mux)
 	kms.New(db).Register(mux)

@@ -6,11 +6,18 @@
 package cloudsql
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/realbackend"
+	"github.com/cesar/gcp-emulator/internal/realbackend/postgres"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
@@ -24,11 +31,28 @@ const (
 
 // Settings replica el subconjunto relevante de sqladmin.Settings.
 type Settings struct {
-	Tier             string `json:"tier"`
-	DataDiskSizeGb   string `json:"dataDiskSizeGb,omitempty"`
-	DataDiskType     string `json:"dataDiskType,omitempty"`
-	ActivationPolicy string `json:"activationPolicy,omitempty"`
-	AvailabilityType string `json:"availabilityType,omitempty"`
+	Tier             string            `json:"tier"`
+	DataDiskSizeGb   string            `json:"dataDiskSizeGb,omitempty"`
+	DataDiskType     string            `json:"dataDiskType,omitempty"`
+	ActivationPolicy string            `json:"activationPolicy,omitempty"`
+	AvailabilityType string            `json:"availabilityType,omitempty"`
+	UserLabels       map[string]string `json:"userLabels,omitempty"`
+}
+
+// RealConnection is an emulator-only extension — not part of the real
+// sqladmin API. When the instance opted into real execution
+// (internal/realbackend.WantsReal, checked against settings.userLabels)
+// and a real embedded Postgres backend was actually admitted (Phase 13),
+// this field is populated with everything needed to connect to it with a
+// real Postgres driver and run real queries. It's omitted from JSON for
+// every shape-only instance, which remains the default for every
+// existing caller (gcloud, Terraform, the pre-Phase-13 test suites).
+type RealConnection struct {
+	Backend  string `json:"backend"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
 }
 
 // IPMapping replica sqladmin.IpMapping.
@@ -39,17 +63,18 @@ type IPMapping struct {
 
 // DatabaseInstance replica sqladmin.DatabaseInstance.
 type DatabaseInstance struct {
-	Kind            string      `json:"kind"`
-	Name            string      `json:"name"`
-	Project         string      `json:"project"`
-	Region          string      `json:"region"`
-	DatabaseVersion string      `json:"databaseVersion"`
-	Settings        Settings    `json:"settings"`
-	State           string      `json:"state"`
-	ConnectionName  string      `json:"connectionName"`
-	IPAddresses     []IPMapping `json:"ipAddresses"`
-	SelfLink        string      `json:"selfLink"`
-	InstanceType    string      `json:"instanceType,omitempty"`
+	Kind            string          `json:"kind"`
+	Name            string          `json:"name"`
+	Project         string          `json:"project"`
+	Region          string          `json:"region"`
+	DatabaseVersion string          `json:"databaseVersion"`
+	Settings        Settings        `json:"settings"`
+	State           string          `json:"state"`
+	ConnectionName  string          `json:"connectionName"`
+	IPAddresses     []IPMapping     `json:"ipAddresses"`
+	SelfLink        string          `json:"selfLink"`
+	InstanceType    string          `json:"instanceType,omitempty"`
+	RealConnection  *RealConnection `json:"realConnection,omitempty"`
 }
 
 // Database replica sqladmin.Database.
@@ -92,10 +117,119 @@ type Operation struct {
 type Svc struct {
 	db  *storage.DB
 	seq int64
+
+	// gov/pgConns back Phase 13's real-backend opt-in. gov is the shared
+	// realbackend.Governor (nil in tests that don't care about real
+	// execution, in which case opt-in requests silently stay shape-only —
+	// the same documented fallback every Phase 11/12 boundary uses).
+	// pgConns maps a governor ID to the live engine handle so
+	// createDatabase/createUser/deleteDatabase/deleteUser know which real
+	// engine to route a statement to; it's kept in sync with the Governor
+	// via SetOnEvict so an evicted/released backend is never used after
+	// it was stopped.
+	mu      sync.Mutex
+	gov     *realbackend.Governor
+	pgConns map[string]*postgres.Backend
 }
 
-func New(db *storage.DB) *Svc {
-	return &Svc{db: db}
+// New creates a Cloud SQL service. gov may be nil (e.g. in tests that
+// don't exercise Phase 13's real-execution opt-in); a nil Governor simply
+// means every instance stays shape-only regardless of opt-in headers,
+// the same zero-cost-by-default behavior as before Phase 13.
+func New(db *storage.DB, gov *realbackend.Governor) *Svc {
+	s := &Svc{db: db, gov: gov, pgConns: map[string]*postgres.Backend{}}
+	if gov != nil {
+		gov.SetOnEvict(s.forgetReal)
+	}
+	return s
+}
+
+func (s *Svc) forgetReal(id string) {
+	s.mu.Lock()
+	delete(s.pgConns, id)
+	s.mu.Unlock()
+}
+
+func realBackendID(project, instance string) string {
+	return "cloudsql:" + instanceKey(project, instance)
+}
+
+func (s *Svc) realBackendFor(project, instance string) *postgres.Backend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pgConns[realBackendID(project, instance)]
+}
+
+// tryStartReal attempts to back inst with a real, embedded Postgres
+// engine when the caller opted in (realbackend.WantsReal, checked
+// against settings.userLabels) and the instance is a Postgres flavor —
+// the only engine this emulator can run without Docker (see ROADMAP.md's
+// "Real-execution: committed scope"). On any failure — no Governor wired,
+// a budget refusal, or the embedded engine failing to start (e.g. no
+// network on its first run, since it needs to download a real postgres
+// binary once) — this logs and leaves inst exactly as shape-only as it
+// would have been before Phase 13. Same documented-fallback pattern as
+// Phase 11's Workflows interpreter (non-JSON sourceContents) and Cloud
+// Armor's CEL boundary.
+func (s *Svc) tryStartReal(r *http.Request, project string, inst *DatabaseInstance) {
+	if s.gov == nil {
+		return
+	}
+	if !realbackend.WantsReal(r, inst.Settings.UserLabels) {
+		return
+	}
+	if !strings.HasPrefix(strings.ToUpper(inst.DatabaseVersion), "POSTGRES") {
+		log.Printf("cloudsql: %s/%s pidió backend real pero databaseVersion=%s no es Postgres, sigue shape-only", project, inst.Name, inst.DatabaseVersion)
+		return
+	}
+	password := randomPassword()
+	backend, err := postgres.Start(password)
+	if err != nil {
+		log.Printf("cloudsql: %s/%s pidió backend real pero no se pudo iniciar Postgres embebido, sigue shape-only: %v", project, inst.Name, err)
+		return
+	}
+	id := realBackendID(project, inst.Name)
+	admitted, evicted := s.gov.Admit(id, backend)
+	if !admitted {
+		log.Printf("cloudsql: %s/%s pidió backend real pero el Governor lo rechazó (budget), sigue shape-only", project, inst.Name)
+		_ = backend.Stop()
+		return
+	}
+	for _, evID := range evicted {
+		log.Printf("cloudsql: backend real %q desalojado (LRU) para liberar espacio para %q", evID, id)
+	}
+	s.mu.Lock()
+	s.pgConns[id] = backend
+	s.mu.Unlock()
+	inst.RealConnection = &RealConnection{
+		Backend:  backend.Kind(),
+		Host:     backend.Host(),
+		Port:     backend.Port(),
+		User:     "postgres",
+		Password: password,
+	}
+}
+
+func randomPassword() string {
+	buf := make([]byte, 16)
+	_, _ = rand.Read(buf)
+	return hex.EncodeToString(buf)
+}
+
+// quoteIdent quotes a Postgres identifier (database/role name) for use in
+// a DDL statement built by this package. This is a local, single-tenant
+// dev engine reachable only from this same machine, not a multi-tenant
+// server exposed to untrusted input — the bar here is correctness against
+// the names gcloud/Terraform actually send, not hardening against a
+// malicious caller.
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// quoteLiteral quotes a Postgres string literal (e.g. a password) for use
+// in a DDL statement built by this package.
+func quoteLiteral(s string) string {
+	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
 }
 
 // Register monta las rutas de Cloud SQL Admin, siguiendo los paths reales
@@ -218,6 +352,7 @@ func (s *Svc) createInstance(w http.ResponseWriter, r *http.Request) {
 	if inst.Settings.Tier == "" {
 		inst.Settings.Tier = "db-f1-micro"
 	}
+	s.tryStartReal(r, project, &inst)
 	if err := s.db.Put(bucketInstances, instanceKey(project, inst.Name), inst); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
@@ -298,6 +433,9 @@ func (s *Svc) patchInstance(w http.ResponseWriter, r *http.Request) {
 func (s *Svc) deleteInstance(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	instance := r.PathValue("instance")
+	if s.gov != nil {
+		s.gov.Release(realBackendID(project, instance))
+	}
 	if err := s.db.Delete(bucketInstances, instanceKey(project, instance)); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
@@ -339,6 +477,12 @@ func (s *Svc) createDatabase(w http.ResponseWriter, r *http.Request) {
 		Charset:   orDefault(body.Charset, "UTF8"),
 		Collation: orDefault(body.Collation, "en_US.UTF8"),
 		SelfLink:  fmt.Sprintf("projects/%s/instances/%s/databases/%s", project, instance, body.Name),
+	}
+	if backend := s.realBackendFor(project, instance); backend != nil {
+		if err := backend.Exec("CREATE DATABASE " + quoteIdent(body.Name)); err != nil {
+			server.WriteError(w, 500, "INTERNAL", "no se pudo crear la base de datos real: "+err.Error())
+			return
+		}
 	}
 	if err := s.db.Put(bucketDatabases, databaseKey(project, instance, body.Name), dbRes); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
@@ -419,6 +563,12 @@ func (s *Svc) deleteDatabase(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	instance := r.PathValue("instance")
 	database := r.PathValue("database")
+	if backend := s.realBackendFor(project, instance); backend != nil {
+		if err := backend.Exec("DROP DATABASE IF EXISTS " + quoteIdent(database)); err != nil {
+			server.WriteError(w, 500, "INTERNAL", "no se pudo eliminar la base de datos real: "+err.Error())
+			return
+		}
+	}
 	if err := s.db.Delete(bucketDatabases, databaseKey(project, instance, database)); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
@@ -461,6 +611,13 @@ func (s *Svc) createUser(w http.ResponseWriter, r *http.Request) {
 		Host:     host,
 		Password: body.Password,
 	}
+	if backend := s.realBackendFor(project, instance); backend != nil {
+		stmt := "CREATE ROLE " + quoteIdent(body.Name) + " LOGIN PASSWORD " + quoteLiteral(body.Password)
+		if err := backend.Exec(stmt); err != nil {
+			server.WriteError(w, 500, "INTERNAL", "no se pudo crear el usuario real: "+err.Error())
+			return
+		}
+	}
 	if err := s.db.Put(bucketUsers, userKey(project, instance, host, body.Name), usr); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
@@ -495,6 +652,12 @@ func (s *Svc) deleteUser(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "name es requerido")
 		return
+	}
+	if backend := s.realBackendFor(project, instance); backend != nil {
+		if err := backend.Exec("DROP ROLE IF EXISTS " + quoteIdent(name)); err != nil {
+			server.WriteError(w, 500, "INTERNAL", "no se pudo eliminar el usuario real: "+err.Error())
+			return
+		}
 	}
 	if err := s.db.Delete(bucketUsers, userKey(project, instance, host, name)); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())

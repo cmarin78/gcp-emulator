@@ -511,6 +511,62 @@ about the engine itself, not about "what the Terraform resource points
 to." If demand shows up for it, it slots into Phase 12's `Backend`
 interface the same way Postgres did — it's deferred, not designed-out.
 
+### Phase 13 — Cloud SQL: real embedded Postgres
+
+The first slice of the committed real-execution scope above, and this
+project's first actual new Go module dependency (`go.mod` previously had
+none beyond `go.etcd.io/bbolt`).
+
+- **`internal/realbackend/postgres`**: a `realbackend.Backend`
+  implementation wrapping a real PostgreSQL server via
+  `github.com/fergusstrange/embedded-postgres` — a real downloaded
+  binary, not a reimplementation and not a Docker container (the first
+  run on a machine needs network access to fetch it; cached after that).
+  `Exec` runs DDL against it via `database/sql` + `github.com/lib/pq`.
+  `FootprintMB` is a fixed, conservative 200MB estimate.
+- **Wired into `internal/services/cloudsql`** behind the existing
+  Phase 12 opt-in (`?backend=real` or
+  `settings.userLabels["emulator.dev/backend"] == "real"`, checked via
+  `realbackend.WantsReal`) and only for a Postgres `databaseVersion` — the
+  only engine this emulator can run without Docker. `createInstance`
+  calls `tryStartReal`, which starts the engine, admits it into the
+  shared `realbackend.Governor`, and on success populates a new
+  `realConnection` field on `DatabaseInstance` — an **emulator-only
+  extension** (not part of the real sqladmin API, omitted from JSON for
+  every shape-only instance) exposing the host/port/user/password a real
+  Postgres client can connect with. `createDatabase`/`createUser` (and
+  their delete counterparts) run real `CREATE`/`DROP DATABASE`/`ROLE`
+  statements against the live engine when the owning instance has one.
+- **Fallback boundary, documented and tested**: if the Governor isn't
+  wired (`nil`), the opt-in isn't requested, the `databaseVersion` isn't
+  Postgres, the engine fails to start (e.g. no network on first run), or
+  the Governor's budget refuses admission, the instance silently stays
+  exactly as shape-only as it was before this phase — the same pattern as
+  Phase 11's Workflows YAML fallback and Cloud Armor's CEL boundary. Zero
+  behavior change for every existing caller that never opts in.
+- **`realbackend.Governor` gained `SetOnEvict`** (additive, doesn't change
+  any existing method's signature) so `cloudsql` can keep its own
+  governor-ID → live-engine map in sync when the Governor evicts or
+  releases a backend — without it, a stale map entry could route a
+  `CREATE DATABASE` to an engine the Governor already stopped. Documented
+  limitation: only one callback is supported process-wide; revisit when a
+  second real-backend consumer (Cloud Run/Functions via Docker) needs its
+  own.
+- **Test coverage split deliberately by network dependency**: the opt-in
+  *decision* logic (defaults to shape-only without opt-in; non-Postgres
+  opt-in stays shape-only; a `nil` Governor never attempts a real engine)
+  is covered by ordinary tests that run in every `go test ./...`/CI pass,
+  no network or real Postgres involved. The actual end-to-end real-engine
+  test (`TestRealPostgresLifecycle`) is gated behind
+  `EMULATOR_REAL_PG_TESTS=1` and skipped otherwise, since it needs to
+  download a real postgres binary on a machine's first run and takes real
+  wall-clock seconds — not something routine CI should pay for by
+  default.
+- **Not yet done**: Monitoring/Logging metrics fed from real Postgres
+  query stats (the third item in the committed scope), and the Cloud
+  Run/Functions Docker-execution item — both remain open for a future
+  slice.
+
 ### Decoupled add-on: network fabric, mini-routers, and GKE/k3d (proposed)
 
 These are the most expensive, most fragile-across-environments items
@@ -545,19 +601,18 @@ add-on**, with a hard design constraint:
 Phase 9, Phase 10, and Phase 11 (behavioral logic) are all done. Phase 12
 (foundation) is also done — `internal/realbackend` ships the `Backend`
 interface, per-resource opt-in, Docker detection, and the budget-aware
-governor, all with zero new Go module dependencies. What's left is the
-committed real-execution scope itself (Cloud Run/Functions real
-containers, Cloud SQL Postgres real, metrics fed from both), which is
-the next tier and the first work in this project to introduce an actual
-new dependency (a real embedded Postgres binary; Docker is an optional
-runtime dependency, not a build-time one). The network/mini-router and
-GKE/k3d add-on is explicitly decoupled — build it opportunistically as a
-separate plug-in piece, never as a dependency the core relies on. MySQL
-and SQL Server real engines stay deferred to "if there's concrete
-demand," using testcontainers/`docker run` directly as the recommended
-interim answer. The pre-existing "larger/niche surfaces" backlog below
-is unrelated to this real-execution work and remains separately
-prioritized.
+governor, all with zero new Go module dependencies. Phase 13 (Cloud SQL
+real embedded Postgres) is implemented on top of that foundation — this
+project's first actual new Go module dependency. What's left of the
+committed scope is Cloud Run/Functions real Docker execution and
+Monitoring/Logging metrics fed from both real backends. The
+network/mini-router and GKE/k3d add-on is explicitly decoupled — build it
+opportunistically as a separate plug-in piece, never as a dependency the
+core relies on. MySQL and SQL Server real engines stay deferred to "if
+there's concrete demand," using testcontainers/`docker run` directly as
+the recommended interim answer. The pre-existing "larger/niche surfaces"
+backlog below is unrelated to this real-execution work and remains
+separately prioritized.
 
 ### Backlog (proposed, lower priority) — Larger/niche surfaces
 
