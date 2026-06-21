@@ -72,6 +72,10 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /dns/v1/projects/{project}/managedZones/{managedZone}", s.deleteZone)
 
 	mux.HandleFunc("GET /dns/v1/projects/{project}/managedZones/{managedZone}/rrsets", s.listRRSets)
+	// rrsets:resolve es una extensión propia del emulador (no existe en la
+	// API real de Cloud DNS, que no resuelve nombres -- ver resolve.go) para
+	// poder validar el grafo de rrsets sin levantar un resolver DNS real.
+	mux.HandleFunc("GET /dns/v1/projects/{project}/managedZones/{managedZone}/rrsets:resolve", s.resolveRRSet)
 
 	mux.HandleFunc("POST /dns/v1/projects/{project}/managedZones/{managedZone}/changes", s.createChange)
 	mux.HandleFunc("GET /dns/v1/projects/{project}/managedZones/{managedZone}/changes", s.listChanges)

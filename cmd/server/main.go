@@ -37,6 +37,7 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/logging"
 	"github.com/cesar/gcp-emulator/internal/services/memorystore"
 	"github.com/cesar/gcp-emulator/internal/services/monitoring"
+	"github.com/cesar/gcp-emulator/internal/services/networkmanagement"
 	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
 	"github.com/cesar/gcp-emulator/internal/services/pubsub"
 	"github.com/cesar/gcp-emulator/internal/services/resourcemanager"
@@ -96,6 +97,7 @@ func main() {
 	orgpolicy.New(db).Register(mux)
 	billingbudgets.New(db).Register(mux)
 	certificatemanager.New(db).Register(mux)
+	networkmanagement.New(db).Register(mux)
 
 	// Endpoint de salud, útil para chequear que el emulador está arriba.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +110,7 @@ func main() {
 	}
 
 	log.Printf("GCP Emulator escuchando en %s (db=%s, web=%s)", *addr, *dbPath, *staticDir)
-	log.Printf("Endpoints: /storage/v1/*  /compute/v1/* (Compute, instance templates/MIGs/autoscalers, Load Balancing + Cloud CDN, Cloud Armor, routers/routes, network peering)  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry, Firestore, KMS, Cloud Scheduler, Cloud Build, Memorystore, Cloud Spanner, GKE, VPC Access connectors, Workflows, Eventarc, Service Networking connections, IAP brands/clients, Cloud Billing Budgets, Certificate Manager)  /file/v1/* (Filestore)  /v2/* (Cloud Run services + Jobs, Cloud Functions, Logging sinks, Cloud Tasks, Org Policy)  /sql/v1beta4/* (Cloud SQL)  /bigquery/v2/* (BigQuery)  /v3/* (Monitoring alert policies, Resource Manager projects)  /dns/v1/* (Cloud DNS)  /healthz")
+	log.Printf("Endpoints: /storage/v1/*  /compute/v1/* (Compute, instance templates/MIGs/autoscalers, Load Balancing + Cloud CDN, Cloud Armor, routers/routes, network peering)  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry, Firestore, KMS, Cloud Scheduler, Cloud Build, Memorystore, Cloud Spanner, GKE, VPC Access connectors, Workflows, Eventarc, Service Networking connections, IAP brands/clients, Cloud Billing Budgets, Certificate Manager, Network Management connectivity tests)  /file/v1/* (Filestore)  /v2/* (Cloud Run services + Jobs, Cloud Functions, Logging sinks, Cloud Tasks, Org Policy)  /sql/v1beta4/* (Cloud SQL)  /bigquery/v2/* (BigQuery)  /v3/* (Monitoring alert policies, Resource Manager projects)  /dns/v1/* (Cloud DNS)  /healthz")
 	// iamenforce envuelve todo el handler con una capa de IAM opcional: solo
 	// actúa sobre requests que mandan el header X-Emulator-Caller (ningún
 	// cliente real -- gcloud/Terraform -- lo manda), así que gcloud/Terraform
