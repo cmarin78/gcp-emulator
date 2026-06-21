@@ -3,10 +3,15 @@
 // resource that the real API actually serves from a separate
 // workflowexecutions.googleapis.com host but under the same logical path —
 // modeled here in one package since they're a single conceptual feature).
-// Real workflow executions run a YAML/JSON-defined state machine; this
-// emulator stores the source text opaquely and resolves every execution to
-// SUCCEEDED synchronously, no real step interpretation, matching the
-// "shape-compatible, not behavior-complete" approach used elsewhere.
+// Real workflow executions run a YAML/JSON-defined state machine. This
+// emulator now really interprets that state machine (see interpreter.go)
+// when sourceContents is a JSON workflow definition: sequential steps,
+// assign, switch/conditionals, return, and call. Real-world workflows are
+// more commonly written in YAML, which this emulator doesn't parse (no
+// new dependency, per Phase 11's ground rules) -- a sourceContents that
+// isn't valid JSON for the modeled shape falls back to the original
+// behavior, resolving immediately to SUCCEEDED with the input argument
+// echoed back as the result.
 package workflows
 
 import (
@@ -40,13 +45,21 @@ type Workflow struct {
 
 // Execution mirrors the relevant subset of executions#Execution.
 type Execution struct {
-	Name               string `json:"name"`
-	StartTime          string `json:"startTime,omitempty"`
-	EndTime            string `json:"endTime,omitempty"`
-	State              string `json:"state,omitempty"`
-	Argument           string `json:"argument,omitempty"`
-	Result             string `json:"result,omitempty"`
-	WorkflowRevisionID string `json:"workflowRevisionId,omitempty"`
+	Name               string          `json:"name"`
+	StartTime          string          `json:"startTime,omitempty"`
+	EndTime            string          `json:"endTime,omitempty"`
+	State              string          `json:"state,omitempty"`
+	Argument           string          `json:"argument,omitempty"`
+	Result             string          `json:"result,omitempty"`
+	Error              *ExecutionError `json:"error,omitempty"`
+	WorkflowRevisionID string          `json:"workflowRevisionId,omitempty"`
+}
+
+// ExecutionError mirrors the relevant subset of executions#Execution.Error
+// -- real Workflows includes a stack trace too, but "payload" (the error
+// message) is the part callers actually check.
+type ExecutionError struct {
+	Payload string `json:"payload,omitempty"`
 }
 
 // Operation mirrors google.longrunning.Operation.
@@ -252,10 +265,13 @@ func (s *Service) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	s.writeOperation(w, project, location, "delete", existing)
 }
 
-// createExecution starts a new execution of an existing workflow. No real
-// step interpretation happens: the execution resolves to SUCCEEDED
-// immediately, with result echoing the input argument (a reasonable
-// shape-compatible default for callers that just check execution.state).
+// createExecution starts a new execution of an existing workflow.
+// sourceContents is interpreted for real (see interpreter.go) when it's a
+// JSON workflow definition: sequential steps, assign, switch, return, and
+// call resolve the execution's actual state/result. When sourceContents
+// isn't valid JSON for that shape (e.g. real-world YAML workflows), the
+// execution falls back to the original behavior: SUCCEEDED immediately,
+// with result echoing the input argument.
 func (s *Service) createExecution(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	location := r.PathValue("location")
@@ -275,16 +291,30 @@ func (s *Service) createExecution(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	executionID := fmt.Sprintf("exec-%d", s.nextID())
-	now := time.Now().UTC().Format(time.RFC3339)
+	startTime := time.Now().UTC().Format(time.RFC3339)
 	exec := Execution{
 		Name:               executionName(project, location, workflow, executionID),
-		StartTime:          now,
-		EndTime:            now,
-		State:              "SUCCEEDED",
+		StartTime:          startTime,
 		Argument:           body.Argument,
-		Result:             body.Argument,
 		WorkflowRevisionID: wf.RevisionID,
 	}
+
+	result, errPayload, interpreted := runDefinition(project, wf.SourceContents, body.Argument)
+	switch {
+	case !interpreted:
+		// sourceContents isn't a JSON definition this interpreter
+		// understands -- preserve the original shape-only behavior.
+		exec.State = "SUCCEEDED"
+		exec.Result = body.Argument
+	case errPayload != "":
+		exec.State = "FAILED"
+		exec.Error = &ExecutionError{Payload: errPayload}
+	default:
+		exec.State = "SUCCEEDED"
+		exec.Result = result
+	}
+	exec.EndTime = time.Now().UTC().Format(time.RFC3339)
+
 	if err := s.db.Put(bucketExecutions, executionKey(project, location, workflow, executionID), exec); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
