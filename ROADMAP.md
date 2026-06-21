@@ -413,56 +413,67 @@ This phase has no Docker/engine dependency and keeps the project's
 "single portable binary" property intact — it's a pure complexity/effort
 question, not an architecture question.
 
-### Phase 12 — Pluggable real-execution foundation (proposed)
+### Phase 12 — Pluggable real-execution foundation
 
 The foundation that Phases 13+ (real compute, real SQL, real network
 traffic) build on. This phase itself doesn't add any user-visible real
 backend — it adds the mechanism so that later phases can, without making
 Docker a hard dependency of the project.
 
-- **Backend interface.** Every service that gets a "real" tier implements
-  it as a second `Backend` behind the same interface as today's
-  shape/logic backend, selected per-resource rather than globally.
-- **Per-resource opt-in.** Real execution is requested at creation time
-  (e.g. a `backend=real` query param, or a label such as
-  `emulator.dev/backend: real` in the resource body). Omitting it keeps
-  today's zero-cost shape-only behavior — nothing changes for existing
-  users unless they explicitly ask for "real" on a specific resource.
-- **Docker/engine detection with fallback.** At startup, and again per
-  opt-in request, the emulator probes for Docker (and any other required
-  engine). If it's missing, the request falls back to shape-only and the
-  response says so explicitly — it never fails silently and never makes
-  Docker mandatory for the project as a whole.
-- **Resource governor, budget-based rather than a flat count.** A flat
-  "max N backends" cap doesn't reflect reality — a real SQL Server
-  container costs roughly 15x what an embedded Postgres does, so capping
-  by *count* either starves the cheap case or overcommits on the
-  expensive one. Instead:
-  - Each backend type declares an estimated footprint (rough RAM, e.g.
-    Postgres embedded ~150MB, generic `docker run` ~100-300MB depending
-    on the image, MySQL/SQL Server containers ~300MB/~2GB, a k3d/kind
-    cluster ~1.5GB).
-  - At startup the emulator detects host RAM (and, when Docker is
-    present, Docker's own configured memory limit — Docker Desktop on
-    Mac/Windows caps itself independently of the host) and derives a
-    working budget (a conservative fraction of the smaller of the two,
-    leaving headroom for the host OS and whatever else is running).
-  - Admission is budget-aware: a new opt-in request is granted if it
-    fits in the remaining budget. If it doesn't fit, the governor first
-    evicts the least-recently-used *idle* real backend(s) to make room
-    (mirroring testcontainers' reaper / LocalStack's container
-    reuse/eviction) before falling back to shape-only — so a laptop
-    under light use can run more real backends, and one under pressure
-    automatically narrows down, without the user tuning anything.
-  - The idle timeout itself scales with budget pressure (shorter when
-    near the limit, longer when there's slack) instead of being one
-    fixed number.
-  - A small introspection endpoint (e.g. `/admin/real-backends`) exposes
-    current budget usage and active backends, so the adaptive behavior
-    is visible rather than a black box.
-  - All of this stays a sane default; `EMULATOR_MAX_REAL_BACKENDS` (or
-    an explicit RAM ceiling) remains available as a manual override for
-    anyone who wants to hard-cap it instead of trusting auto-detection.
+- **Backend interface. Done.** New `internal/realbackend` package defines
+  `Backend` (`Kind() string`, `FootprintMB() int`, `Stop() error`) — the
+  shape every Phase 13+ real backend (Docker-run Cloud Run/Functions, an
+  embedded Postgres for Cloud SQL) will implement. No concrete `Backend`
+  exists yet; this phase ships only the interface and the machinery
+  around it.
+- **Per-resource opt-in. Done.** `realbackend.WantsReal(r, labels)`
+  checks for `?backend=real` on the request or a
+  `labels["emulator.dev/backend"] == "real"` entry in the body — either
+  is enough, neither is required. No existing caller (gcloud, Terraform,
+  the 30+ existing test packages) sends either, so today's zero-cost
+  shape-only behavior is unchanged for everyone until Phase 13+ wires a
+  concrete backend behind this check.
+- **Docker/engine detection with fallback. Done.** `realbackend.DetectDocker`
+  shells out to `docker version` (no Docker Go SDK added — consistent
+  with this project's no-new-dependency convention) with a 3s timeout,
+  returning `Available`/`Detail` rather than an error, so probing is
+  always safe to call speculatively. Logged once at startup; Phase 13+
+  backends call it again per opt-in request and fall back to shape-only
+  when it's false.
+- **Resource governor, budget-based rather than a flat count. Done.**
+  `realbackend.Governor` tracks admitted backends by RAM footprint
+  against a detected budget:
+  - `realbackend.DetectHostRAMMB` reads `/proc/meminfo` on Linux,
+    PowerShell's `Get-CimInstance Win32_ComputerSystem` on Windows, and
+    `sysctl hw.memsize` on macOS (shell-outs, not a new dependency, same
+    approach as Docker detection) to get total host RAM.
+    `DetectBudgetMB` takes 25% of that as the working budget, floored at
+    a 512MB conservative default whenever detection fails or yields too
+    little — startup never blocks or refuses on this.
+  - `Governor.Admit(id, backend)` is budget-aware: it admits immediately
+    if there's room, otherwise evicts least-recently-used backends
+    (calling `Stop` on each) until there's room or nothing left to
+    evict, in which case it refuses rather than over-committing. A
+    backend whose own footprint exceeds the *entire* budget is refused
+    outright.
+  - **Documented simplification:** the roadmap calls for evicting
+    LRU-among-*idle* backends specifically. This foundation has no
+    in-use signal beyond `Governor.Touch`'s timestamp — what "currently
+    in use" means depends on what a concrete backend actually does (an
+    open connection vs. closed, mid-request vs. idle), which doesn't
+    exist until Phase 13+ defines one. So for now every admitted backend
+    is plain-LRU eviction-eligible; a backend that needs stronger
+    in-use protection calls `Touch` on every active use.
+  - `Governor.IdleTimeout()` scales linearly between 5min (full budget
+    pressure) and 30min (no pressure), for Phase 13+ backends to poll
+    instead of hardcoding one number.
+  - `GET /admin/real-backends` (registered unconditionally at startup,
+    `internal/realbackend/admin.go`) returns `{budgetMb, usedMb,
+    backends: [...]}` — reports zero backends today, but is a stable
+    place for tooling to point at before Phase 13+ adds a real one.
+  - `EMULATOR_MAX_REAL_BACKENDS`/an explicit RAM-ceiling override is
+    **not yet implemented** — deferred to whichever Phase 13+ backend
+    first needs it, since there's nothing to cap yet.
 - **Note:** within the committed scope below, every real backend has a
   no-Docker fallback (Postgres is embeddable outright). Flavors that have
   no embeddable option at all (MySQL/SQL Server real engines) are exactly
@@ -531,11 +542,15 @@ add-on**, with a hard design constraint:
 
 ### Recommendation
 
-Phase 9 and Phase 10 are both done. Phase 11 (behavioral logic) is the
-highest-value, lowest-risk next step — no new dependency, broadly
-reusable. Phase 12 (foundation) plus the committed real-execution scope
-(Cloud Run/Functions real containers, Cloud SQL Postgres real, metrics
-fed from both) is the next tier after that. The network/mini-router and
+Phase 9, Phase 10, and Phase 11 (behavioral logic) are all done. Phase 12
+(foundation) is also done — `internal/realbackend` ships the `Backend`
+interface, per-resource opt-in, Docker detection, and the budget-aware
+governor, all with zero new Go module dependencies. What's left is the
+committed real-execution scope itself (Cloud Run/Functions real
+containers, Cloud SQL Postgres real, metrics fed from both), which is
+the next tier and the first work in this project to introduce an actual
+new dependency (a real embedded Postgres binary; Docker is an optional
+runtime dependency, not a build-time one). The network/mini-router and
 GKE/k3d add-on is explicitly decoupled — build it opportunistically as a
 separate plug-in piece, never as a dependency the core relies on. MySQL
 and SQL Server real engines stay deferred to "if there's concrete

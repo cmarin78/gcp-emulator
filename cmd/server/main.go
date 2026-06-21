@@ -6,12 +6,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 
 	"github.com/cesar/gcp-emulator/internal/iamenforce"
+	"github.com/cesar/gcp-emulator/internal/realbackend"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/services/artifactregistry"
 	"github.com/cesar/gcp-emulator/internal/services/bigquery"
@@ -64,6 +66,17 @@ func main() {
 	srv := server.New()
 	mux := srv.Mux()
 
+	// Phase 12: pluggable real-execution foundation. No concrete real
+	// backend exists yet (Phase 13+ adds Cloud Run/Functions via Docker
+	// and an embedded Postgres for Cloud SQL) -- this just stands up the
+	// budget-aware admission governor and its introspection endpoint so
+	// later phases have somewhere to plug into from day one.
+	realBudgetMB := realbackend.DetectBudgetMB()
+	realGovernor := realbackend.NewGovernor(realBudgetMB)
+	realbackend.RegisterAdmin(mux, realGovernor)
+	dockerAvail := realbackend.DetectDocker(context.Background())
+	log.Printf("real-backend foundation: budget=%dMB docker-available=%v (%s)", realBudgetMB, dockerAvail.Available, dockerAvail.Detail)
+
 	iam.New(db).Register(mux)
 	gcs.New(db).Register(mux)
 	compute.New(db).Register(mux)
@@ -110,7 +123,7 @@ func main() {
 	}
 
 	log.Printf("GCP Emulator escuchando en %s (db=%s, web=%s)", *addr, *dbPath, *staticDir)
-	log.Printf("Endpoints: /storage/v1/*  /compute/v1/* (Compute, instance templates/MIGs/autoscalers, Load Balancing + Cloud CDN, Cloud Armor, routers/routes, network peering)  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry, Firestore, KMS, Cloud Scheduler, Cloud Build, Memorystore, Cloud Spanner, GKE, VPC Access connectors, Workflows, Eventarc, Service Networking connections, IAP brands/clients, Cloud Billing Budgets, Certificate Manager, Network Management connectivity tests)  /file/v1/* (Filestore)  /v2/* (Cloud Run services + Jobs, Cloud Functions, Logging sinks, Cloud Tasks, Org Policy)  /sql/v1beta4/* (Cloud SQL)  /bigquery/v2/* (BigQuery)  /v3/* (Monitoring alert policies, Resource Manager projects)  /dns/v1/* (Cloud DNS)  /healthz")
+	log.Printf("Endpoints: /storage/v1/*  /compute/v1/* (Compute, instance templates/MIGs/autoscalers, Load Balancing + Cloud CDN, Cloud Armor, routers/routes, network peering)  /v1/* (IAM, Pub/Sub, Secret Manager, Artifact Registry, Firestore, KMS, Cloud Scheduler, Cloud Build, Memorystore, Cloud Spanner, GKE, VPC Access connectors, Workflows, Eventarc, Service Networking connections, IAP brands/clients, Cloud Billing Budgets, Certificate Manager, Network Management connectivity tests)  /file/v1/* (Filestore)  /v2/* (Cloud Run services + Jobs, Cloud Functions, Logging sinks, Cloud Tasks, Org Policy)  /sql/v1beta4/* (Cloud SQL)  /bigquery/v2/* (BigQuery)  /v3/* (Monitoring alert policies, Resource Manager projects)  /dns/v1/* (Cloud DNS)  /healthz  /admin/real-backends (Phase 12 real-execution governor introspection)")
 	// iamenforce envuelve todo el handler con una capa de IAM opcional: solo
 	// actúa sobre requests que mandan el header X-Emulator-Caller (ningún
 	// cliente real -- gcloud/Terraform -- lo manda), así que gcloud/Terraform
