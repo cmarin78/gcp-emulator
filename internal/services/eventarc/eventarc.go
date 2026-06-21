@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -34,10 +35,25 @@ type CloudRunDestination struct {
 	Path    string `json:"path,omitempty"`
 }
 
-// Destination mirrors eventarc#Destination (only the Cloud Run variant is
-// modeled — the single most common case in real-world Terraform configs).
+// HTTPEndpoint mirrors eventarc#HttpEndpoint -- a real, supported
+// Destination variant (destination.http_endpoint in
+// google_eventarc_trigger) that points at an arbitrary URL instead of
+// resolving a GCP resource. Used here as the reliably-dispatchable
+// destination for real CloudEvent delivery (see dispatch.go): a Cloud Run
+// destination requires resolving the named service to its URI, which only
+// succeeds if that service actually exists in this emulator.
+type HTTPEndpoint struct {
+	URI string `json:"uri"`
+}
+
+// Destination mirrors eventarc#Destination. Only CloudRun and HTTPEndpoint
+// are modeled -- the real API also has GKE and Workflow variants, but
+// these two cover the common Terraform cases and, combined, give Phase 11
+// dispatch (dispatch.go) both a resource-resolved path and an
+// always-reachable path for tests.
 type Destination struct {
-	CloudRun *CloudRunDestination `json:"cloudRun,omitempty"`
+	CloudRun     *CloudRunDestination `json:"cloudRun,omitempty"`
+	HTTPEndpoint *HTTPEndpoint        `json:"httpEndpoint,omitempty"`
 }
 
 // PubsubTransport mirrors eventarc#Pubsub.
@@ -86,6 +102,23 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/projects/{project}/locations/{location}/triggers/{trigger}", s.getTrigger)
 	mux.HandleFunc("PATCH /v1/projects/{project}/locations/{location}/triggers/{trigger}", s.patchTrigger)
 	mux.HandleFunc("DELETE /v1/projects/{project}/locations/{location}/triggers/{trigger}", s.deleteTrigger)
+	// "{trigger}:publishEvent" no se puede expresar como un patrón mixto en
+	// el mux de Go (un wildcard debe ocupar el segmento completo); se
+	// captura el segmento entero y se separa con strings.Cut, mismo patrón
+	// que Cloud Scheduler usa para "{job}:run"/":pause"/":resume" y que
+	// networkmanagement usa para "{test}:rerun".
+	mux.HandleFunc("POST /v1/projects/{project}/locations/{location}/triggers/{triggerAction}", s.triggerAction)
+}
+
+// triggerAction despacha el único custom method de este recurso
+// ("{trigger}:publishEvent", ver dispatch.go).
+func (s *Service) triggerAction(w http.ResponseWriter, r *http.Request) {
+	id, action, ok := strings.Cut(r.PathValue("triggerAction"), ":")
+	if !ok || action != "publishEvent" {
+		server.WriteError(w, 404, "NOT_FOUND", "ruta no encontrada")
+		return
+	}
+	s.publishEvent(w, r, id)
 }
 
 func triggerKey(project, location, trigger string) string {
@@ -136,8 +169,10 @@ func (s *Service) createTrigger(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", "eventFilters is required")
 		return
 	}
-	if body.Destination.CloudRun == nil || body.Destination.CloudRun.Service == "" {
-		server.WriteError(w, 400, "INVALID_ARGUMENT", "destination.cloudRun.service is required")
+	hasCloudRun := body.Destination.CloudRun != nil && body.Destination.CloudRun.Service != ""
+	hasHTTPEndpoint := body.Destination.HTTPEndpoint != nil && body.Destination.HTTPEndpoint.URI != ""
+	if !hasCloudRun && !hasHTTPEndpoint {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "destination.cloudRun.service or destination.httpEndpoint.uri is required")
 		return
 	}
 	var existing Trigger
