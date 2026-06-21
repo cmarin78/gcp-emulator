@@ -157,6 +157,29 @@ func TestSetOnEvictNotifiesOnEvictionAndRelease(t *testing.T) {
 	}
 }
 
+// TestSetOnEvictSupportsMultipleCallbacks covers Phase 14's fix to the
+// Phase 12 limitation noted in SetOnEvict's doc comment: two independent
+// real-backend consumers (e.g. cloudsql and cloudrun) each register their
+// own callback, and both must fire for every eviction/release — neither
+// registration should clobber the other.
+func TestSetOnEvictSupportsMultipleCallbacks(t *testing.T) {
+	g := NewGovernor(300)
+	var first, second []string
+	g.SetOnEvict(func(id string) { first = append(first, id) })
+	g.SetOnEvict(func(id string) { second = append(second, id) })
+
+	b := &fakeBackend{kind: "x", footprint: 100}
+	g.Admit("a", b)
+	g.Release("a")
+
+	if len(first) != 1 || first[0] != "a" {
+		t.Fatalf("expected first callback to fire for release, got %v", first)
+	}
+	if len(second) != 1 || second[0] != "a" {
+		t.Fatalf("expected second callback to fire for release too, got %v", second)
+	}
+}
+
 func TestSnapshotBackendsNeverNil(t *testing.T) {
 	g := NewGovernor(100)
 	snap := g.Snapshot()

@@ -26,13 +26,13 @@ const (
 
 // ManagedZone replica el recurso "ManagedZone".
 type ManagedZone struct {
-	Name          string   `json:"name"`
-	DNSName       string   `json:"dnsName"`
-	Description   string   `json:"description,omitempty"`
-	Id            string   `json:"id"`
-	CreationTime  string   `json:"creationTime,omitempty"`
-	NameServers   []string `json:"nameServers,omitempty"`
-	Visibility    string   `json:"visibility,omitempty"`
+	Name         string   `json:"name"`
+	DNSName      string   `json:"dnsName"`
+	Description  string   `json:"description,omitempty"`
+	Id           string   `json:"id"`
+	CreationTime string   `json:"creationTime,omitempty"`
+	NameServers  []string `json:"nameServers,omitempty"`
+	Visibility   string   `json:"visibility,omitempty"`
 }
 
 // ResourceRecordSet replica el recurso "ResourceRecordSet". La clave real

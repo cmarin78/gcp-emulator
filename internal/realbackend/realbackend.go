@@ -70,7 +70,7 @@ type Governor struct {
 	mu       sync.Mutex
 	budgetMB int
 	backends map[string]*managedBackend
-	onEvict  func(id string)
+	onEvict  []func(id string)
 }
 
 // NewGovernor creates a Governor with the given RAM budget in MB. Use
@@ -86,24 +86,31 @@ func NewGovernor(budgetMB int) *Governor {
 // governor ID to its live *postgres.Backend, so it knows which engine to
 // route a CREATE DATABASE/ROLE statement to) should register this to
 // stay in sync rather than risk talking to a backend the Governor already
-// stopped. Safe to call with nil to clear it.
+// stopped.
 //
-// Known limitation, deliberately not solved here: only one callback is
-// supported, registered once. Fine while cloudsql is the only real-backend
-// consumer; revisit (e.g. a slice of callbacks) if/when a second one
-// (Cloud Run/Functions via Docker) needs its own.
+// Multiple callbacks can be registered — each call appends rather than
+// replaces, so independent real-backend consumers (Phase 13's cloudsql,
+// Phase 14's cloudrun/cloudfunctions) can each register their own without
+// clobbering one another. All registered callbacks are invoked, in
+// registration order, for every eviction/release. Calling with nil is a
+// no-op (there's nothing meaningful to append).
 func (g *Governor) SetOnEvict(fn func(id string)) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.onEvict = fn
-}
-
-func notifyEvicted(fn func(id string), ids []string) {
 	if fn == nil {
 		return
 	}
-	for _, id := range ids {
-		fn(id)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.onEvict = append(g.onEvict, fn)
+}
+
+func notifyEvicted(fns []func(id string), ids []string) {
+	for _, fn := range fns {
+		if fn == nil {
+			continue
+		}
+		for _, id := range ids {
+			fn(id)
+		}
 	}
 }
 

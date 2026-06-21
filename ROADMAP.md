@@ -567,6 +567,82 @@ none beyond `go.etcd.io/bbolt`).
   Run/Functions Docker-execution item — both remain open for a future
   slice.
 
+### Phase 14 — Cloud Run / Cloud Functions: real Docker execution
+
+The second slice of the committed real-execution scope, closing out the
+Cloud Run/Functions item left open by Phase 13. No new Go module
+dependency — like the rest of this codebase's Docker-detection code, it
+shells out to the `docker` CLI via `os/exec` rather than pulling in a
+Docker Go SDK.
+
+- **`internal/realbackend/dockerrun`**: a new package providing two
+  shapes. `Backend` (implements `realbackend.Backend`) wraps a
+  long-running `docker run -d` container, used by Cloud Run Services and
+  Cloud Functions — `Start` reserves a free host port, runs the
+  container, and polls the port until it's reachable (or a `readyTimeout`
+  elapses). A separate, stateless `RunToCompletion` runs a container to
+  completion and reports its exit code and captured output, used by Cloud
+  Run Jobs' synchronous `:run` action — a Job execution is one-shot, so it
+  is never admitted into the Governor the way a Service's container is.
+  Both paths bound the underlying `docker run` invocation itself with its
+  own timeout, independent of the port-wait, so a nonexistent or
+  unpullable image fails in bounded time rather than hanging the
+  triggering request.
+- **`realbackend.Governor.SetOnEvict` is now additive**: it used to
+  overwrite a single callback (Phase 13's documented limitation, now
+  resolved); it now appends to a slice, so cloudsql, cloudrun, and
+  cloudfunctions can each register their own eviction callback
+  independently without clobbering one another.
+- **Wired into `internal/services/cloudrun`** (both Services and Jobs)
+  and **`internal/services/cloudfunctions`**, behind the same opt-in this
+  project has used since Phase 12 (`?backend=real` or a
+  `emulator.dev/backend: real` label, checked via
+  `realbackend.WantsReal`):
+  - **Cloud Run Services**: `createService`/`updateService` call
+    `tryStartReal`, which starts `template.containers[0].image` (defaults
+    to port 8080 if `containerPort` isn't set, matching Cloud Run's own
+    `$PORT` convention), admits it into the shared `realbackend.Governor`,
+    and on success populates a new `realEndpoint` field — an
+    **emulator-only extension** (not part of the real Cloud Run API,
+    omitted from JSON for every shape-only service) pointing at the real,
+    locally reachable URL fronting the container. The pre-existing
+    cosmetic `uri`/`fakeURI` fields are untouched. An update that changes
+    the container template always stops any existing real container
+    first, so an image change never leaves a stale container running.
+  - **Cloud Run Jobs**: the `:run` action's opt-in is structurally
+    different, since a Job execution isn't a long-running resource — it
+    runs `RunToCompletion` synchronously and returns the result directly
+    in the `:run` operation's response under a new `realRun` key
+    (`{exitCode, output}`), never touching the Governor at all. The
+    job's `timeout` field (e.g. `"600s"`) is parsed for the run's bound,
+    falling back to a 300s default.
+  - **Cloud Functions**: Gen2's real API has no field anywhere for
+    specifying a container image (a real Gen2 deploy builds one from
+    source via Cloud Build, which this emulator doesn't implement), so
+    real execution here requires a second, explicit opt-in beyond the
+    label check — a new emulator-only `realExecution.image` field naming
+    a pre-built image to run directly. Labeling alone, without
+    `realExecution.image`, logs why and stays shape-only.
+- **Fallback boundary, same shape as Phase 13**: no Governor wired,
+  opt-in not requested, the precondition specific to each resource
+  (Services/Jobs need `containers[0].image`; Functions need
+  `realExecution.image`), Docker unavailable, or the Governor's budget
+  refusing admission — every one of these leaves the resource exactly as
+  shape-only as it was before this phase, logged but never failing the
+  request.
+- **Test coverage split the same way as Phase 13**: opt-in decision logic
+  (defaults to shape-only without opt-in; a `nil` Governor never attempts
+  real execution; a missing per-resource precondition stays shape-only)
+  is covered by ordinary tests with no Docker dependency, run in every
+  `go test ./...`/CI pass. The actual end-to-end real-container tests are
+  gated behind `EMULATOR_REAL_DOCKER_TESTS=1` (and additionally skip
+  cleanly if Docker isn't actually installed on the machine, via the same
+  `realbackend.DetectDocker` check used in production code) — not
+  something routine CI should pay for by default.
+- **Not yet done**: Monitoring/Logging metrics fed from Docker's own
+  stats API for these real containers (the remaining item in the
+  committed scope).
+
 ### Decoupled add-on: network fabric, mini-routers, and GKE/k3d (proposed)
 
 These are the most expensive, most fragile-across-environments items
@@ -602,17 +678,17 @@ Phase 9, Phase 10, and Phase 11 (behavioral logic) are all done. Phase 12
 (foundation) is also done — `internal/realbackend` ships the `Backend`
 interface, per-resource opt-in, Docker detection, and the budget-aware
 governor, all with zero new Go module dependencies. Phase 13 (Cloud SQL
-real embedded Postgres) is implemented on top of that foundation — this
-project's first actual new Go module dependency. What's left of the
-committed scope is Cloud Run/Functions real Docker execution and
-Monitoring/Logging metrics fed from both real backends. The
-network/mini-router and GKE/k3d add-on is explicitly decoupled — build it
-opportunistically as a separate plug-in piece, never as a dependency the
-core relies on. MySQL and SQL Server real engines stay deferred to "if
-there's concrete demand," using testcontainers/`docker run` directly as
-the recommended interim answer. The pre-existing "larger/niche surfaces"
-backlog below is unrelated to this real-execution work and remains
-separately prioritized.
+real embedded Postgres) and Phase 14 (Cloud Run/Functions real Docker
+execution) are both implemented on top of that foundation. What's left
+of the committed scope is Monitoring/Logging metrics fed from all three
+real backends (embedded Postgres, and Docker containers for Cloud
+Run/Functions). The network/mini-router and GKE/k3d add-on is explicitly
+decoupled — build it opportunistically as a separate plug-in piece, never
+as a dependency the core relies on. MySQL and SQL Server real engines
+stay deferred to "if there's concrete demand," using
+testcontainers/`docker run` directly as the recommended interim answer.
+The pre-existing "larger/niche surfaces" backlog below is unrelated to
+this real-execution work and remains separately prioritized.
 
 ### Backlog (proposed, lower priority) — Larger/niche surfaces
 

@@ -52,10 +52,10 @@ type ShieldedInstanceConfig struct {
 // NodeConfig mirrors the real container#NodeConfig subset most commonly set.
 type NodeConfig struct {
 	MachineType            string                  `json:"machineType,omitempty"`
-	DiskSizeGb              int64                   `json:"diskSizeGb,omitempty"`
-	OauthScopes             []string                `json:"oauthScopes,omitempty"`
-	WorkloadMetadataConfig  *WorkloadMetadataConfig `json:"workloadMetadataConfig,omitempty"`
-	ShieldedInstanceConfig  *ShieldedInstanceConfig `json:"shieldedInstanceConfig,omitempty"`
+	DiskSizeGb             int64                   `json:"diskSizeGb,omitempty"`
+	OauthScopes            []string                `json:"oauthScopes,omitempty"`
+	WorkloadMetadataConfig *WorkloadMetadataConfig `json:"workloadMetadataConfig,omitempty"`
+	ShieldedInstanceConfig *ShieldedInstanceConfig `json:"shieldedInstanceConfig,omitempty"`
 }
 
 // NodePool mirrors the real container#NodePool resource, scoped to a parent
@@ -99,8 +99,8 @@ type AddonsConfig struct {
 // (alias IP) clusters are the modern default and always report a
 // non-empty clusterIpv4Cidr/servicesIpv4Cidr pair.
 type IPAllocationPolicy struct {
-	UseIpAliases    bool   `json:"useIpAliases"`
-	ClusterIpv4Cidr string `json:"clusterIpv4Cidr"`
+	UseIpAliases     bool   `json:"useIpAliases"`
+	ClusterIpv4Cidr  string `json:"clusterIpv4Cidr"`
 	ServicesIpv4Cidr string `json:"servicesIpv4Cidr"`
 }
 
@@ -319,9 +319,9 @@ func (s *Service) createCluster(w http.ResponseWriter, r *http.Request) {
 		NetworkPolicyConfig:      networkPolicyConfig{Disabled: true},
 	}
 	c.IPAllocationPolicy = &IPAllocationPolicy{
-		UseIpAliases:      true,
-		ClusterIpv4Cidr:   c.ClusterIpv4Cidr,
-		ServicesIpv4Cidr:  c.ServicesIpv4Cidr,
+		UseIpAliases:     true,
+		ClusterIpv4Cidr:  c.ClusterIpv4Cidr,
+		ServicesIpv4Cidr: c.ServicesIpv4Cidr,
 	}
 	c.LegacyAbac = &LegacyAbac{Enabled: false}
 	c.ReleaseChannel = &ReleaseChannel{Channel: "UNSPECIFIED"}

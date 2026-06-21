@@ -9,9 +9,13 @@ package cloudrun
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/realbackend"
+	"github.com/cesar/gcp-emulator/internal/realbackend/dockerrun"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
@@ -72,6 +76,25 @@ type Service struct {
 	ObservedGeneration    string            `json:"observedGeneration"`
 	Reconciling           bool              `json:"reconciling"`
 	TerminalCondition     Condition         `json:"terminalCondition"`
+
+	// RealEndpoint is an emulator-only extension — not part of the real
+	// Cloud Run API. When the service opted into real execution
+	// (internal/realbackend.WantsReal, checked against Labels) and a real
+	// Docker container running template.containers[0].image was actually
+	// admitted (Phase 14), this points at the real, locally reachable URL
+	// fronting that container. The existing URI field above stays exactly
+	// as cosmetic as it always was (never backed by a real listener) for
+	// backward compatibility; RealEndpoint is additive and omitted from
+	// JSON for every shape-only service, which remains the default for
+	// every existing caller (gcloud, Terraform, the pre-existing test
+	// suite).
+	RealEndpoint *RealEndpoint `json:"realEndpoint,omitempty"`
+}
+
+// RealEndpoint is documented on Service.RealEndpoint above.
+type RealEndpoint struct {
+	Backend string `json:"backend"`
+	URL     string `json:"url"`
 }
 
 // Operation replica el shape genérico google.longrunning.Operation.
@@ -84,10 +107,118 @@ type Operation struct {
 type Svc struct {
 	db  *storage.DB
 	seq int64
+
+	// gov/containers back Phase 14's real-backend opt-in, mirroring
+	// Phase 13's cloudsql.Svc exactly: gov is the shared
+	// realbackend.Governor (nil in tests that don't care about real
+	// execution, in which case opt-in requests silently stay shape-only).
+	// containers maps a governor ID to the live *dockerrun.Backend so
+	// updateService/deleteService/jobAction know which container to stop;
+	// it's kept in sync with the Governor via SetOnEvict so an evicted/
+	// released backend is never used after it was stopped.
+	mu         sync.Mutex
+	gov        *realbackend.Governor
+	containers map[string]*dockerrun.Backend
 }
 
-func New(db *storage.DB) *Svc {
-	return &Svc{db: db}
+// New creates a Cloud Run service. gov may be nil (e.g. in tests that
+// don't exercise Phase 14's real-execution opt-in); a nil Governor simply
+// means every service/job stays shape-only regardless of opt-in headers,
+// the same zero-cost-by-default behavior as before Phase 14.
+func New(db *storage.DB, gov *realbackend.Governor) *Svc {
+	s := &Svc{db: db, gov: gov, containers: map[string]*dockerrun.Backend{}}
+	if gov != nil {
+		gov.SetOnEvict(s.forgetReal)
+	}
+	return s
+}
+
+func (s *Svc) forgetReal(id string) {
+	s.mu.Lock()
+	delete(s.containers, id)
+	s.mu.Unlock()
+}
+
+func serviceBackendID(name string) string { return "cloudrun:service:" + name }
+
+func (s *Svc) realBackendFor(name string) *dockerrun.Backend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.containers[serviceBackendID(name)]
+}
+
+// tryStartReal attempts to back svc with a real Docker container running
+// its template's image, when the caller opted in (realbackend.WantsReal,
+// checked against svc.Labels) and a Docker engine is actually reachable
+// (realbackend.DetectDocker). On any failure — no Governor wired, Docker
+// unavailable, a budget refusal, or the container failing to start/become
+// reachable — this logs and leaves svc exactly as shape-only as it would
+// have been before Phase 14. Same documented-fallback pattern as Cloud
+// SQL's tryStartReal (Phase 13).
+func (s *Svc) tryStartReal(r *http.Request, svc *Service) {
+	if s.gov == nil {
+		return
+	}
+	if !realbackend.WantsReal(r, svc.Labels) {
+		return
+	}
+	if len(svc.Template.Containers) == 0 || svc.Template.Containers[0].Image == "" {
+		return
+	}
+	avail := realbackend.DetectDocker(r.Context())
+	if !avail.Available {
+		log.Printf("cloudrun: %s pidió backend real pero Docker no está disponible (%s), sigue shape-only", svc.Name, avail.Detail)
+		return
+	}
+	container := svc.Template.Containers[0]
+	backend, err := dockerrun.Start(container.Image, envMapOf(container.Env), containerPortOf(container), 0)
+	if err != nil {
+		log.Printf("cloudrun: %s pidió backend real pero no se pudo iniciar el contenedor, sigue shape-only: %v", svc.Name, err)
+		return
+	}
+	id := serviceBackendID(svc.Name)
+	admitted, evicted := s.gov.Admit(id, backend)
+	if !admitted {
+		log.Printf("cloudrun: %s pidió backend real pero el Governor lo rechazó (budget), sigue shape-only", svc.Name)
+		_ = backend.Stop()
+		return
+	}
+	for _, evID := range evicted {
+		log.Printf("cloudrun: backend real %q desalojado (LRU) para liberar espacio para %q", evID, id)
+	}
+	s.mu.Lock()
+	s.containers[id] = backend
+	s.mu.Unlock()
+	svc.RealEndpoint = &RealEndpoint{Backend: backend.Kind(), URL: backend.URL()}
+}
+
+// stopReal releases (and stops) any real container backing the named
+// service. Safe to call even when none is registered (Governor.Release is
+// a no-op for an absent id).
+func (s *Svc) stopReal(name string) {
+	if s.gov == nil {
+		return
+	}
+	s.gov.Release(serviceBackendID(name))
+}
+
+// containerPortOf returns the container port a real backend should
+// publish: the template's explicit port if set, else 8080 — the real
+// Cloud Run convention (the container is expected to listen on $PORT,
+// default 8080).
+func containerPortOf(c Container) int {
+	if len(c.Ports) > 0 && c.Ports[0].ContainerPort > 0 {
+		return c.Ports[0].ContainerPort
+	}
+	return 8080
+}
+
+func envMapOf(vars []EnvVar) map[string]string {
+	m := map[string]string{}
+	for _, v := range vars {
+		m[v.Name] = v.Value
+	}
+	return m
 }
 
 // Register monta las rutas de Cloud Run, siguiendo los paths reales de
@@ -172,6 +303,7 @@ func (s *Svc) createService(w http.ResponseWriter, r *http.Request) {
 		Reconciling:           false,
 		TerminalCondition:     Condition{Type: "Ready", State: "CONDITION_SUCCEEDED"},
 	}
+	s.tryStartReal(r, &svc)
 	if err := s.db.Put(bucketServices, svc.Name, svc); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
@@ -244,7 +376,14 @@ func (s *Svc) updateService(w http.ResponseWriter, r *http.Request) {
 		existing.Ingress = body.Ingress
 	}
 	if len(body.Template.Containers) > 0 {
+		// A new template means any currently-running real container is
+		// stale (it's running the old image) — stop it before possibly
+		// starting a fresh one below. stopReal is a safe no-op if no real
+		// backend is currently registered for this service.
+		s.stopReal(existing.Name)
+		existing.RealEndpoint = nil
 		existing.Template = body.Template
+		s.tryStartReal(r, &existing)
 	}
 	existing.Generation = bumpGeneration(existing.Generation)
 	existing.ObservedGeneration = existing.Generation
@@ -260,6 +399,7 @@ func (s *Svc) deleteService(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	location := r.PathValue("location")
 	name := serviceName(project, location, r.PathValue("service"))
+	s.stopReal(name)
 	if err := s.db.Delete(bucketServices, name); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return

@@ -4,14 +4,27 @@
 // sintetiza una URL de invocación con el mismo formato, sin desplegar
 // nada de verdad. Las operaciones de mutación se devuelven como
 // "google.longrunning.Operation" ya resueltas (done=true).
+//
+// Phase 14 adds an opt-in (internal/realbackend.WantsReal, checked
+// against the function's labels) for real Docker execution, mirroring
+// Cloud Run Services' tryStartReal — but Gen2's real API has no field at
+// all for specifying a container image (a real Gen2 deploy builds one
+// from source via Cloud Build, which this emulator doesn't implement), so
+// real execution here only ever applies when the caller also sets a new,
+// clearly-documented emulator-only field, RealExecution.Image, naming a
+// pre-built image to run directly instead.
 package cloudfunctions
 
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/realbackend"
+	"github.com/cesar/gcp-emulator/internal/realbackend/dockerrun"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
@@ -63,6 +76,36 @@ type Function struct {
 	Labels        map[string]string `json:"labels,omitempty"`
 	CreateTime    string            `json:"createTime"`
 	UpdateTime    string            `json:"updateTime"`
+
+	// RealExecution is an emulator-only extension, accepted on
+	// create/update — not part of the real Cloud Functions API, which has
+	// no way to specify a container image directly. Set Image to opt a
+	// function into Phase 14's real Docker execution (also requires
+	// internal/realbackend.WantsReal via Labels); the emulator then runs
+	// that image directly instead of attempting (and failing) to build
+	// the function's actual source.
+	RealExecution *RealExecution `json:"realExecution,omitempty"`
+
+	// RealEndpoint is an emulator-only extension — not part of the real
+	// Cloud Functions API. Populated only when RealExecution.Image was
+	// set, the opt-in was requested, and a real container was actually
+	// admitted; points at the real, locally reachable URL fronting it.
+	// ServiceConfig.URI above stays exactly as cosmetic as it always was.
+	RealEndpoint *RealEndpoint `json:"realEndpoint,omitempty"`
+}
+
+// RealExecution is documented on Function.RealExecution above.
+type RealExecution struct {
+	Image string `json:"image"`
+}
+
+// RealEndpoint is documented on Function.RealEndpoint above. Duplicated
+// (rather than imported) from internal/services/cloudrun's identical
+// shape, per this project's "duplicate small helpers, avoid cross-package
+// coupling" convention.
+type RealEndpoint struct {
+	Backend string `json:"backend"`
+	URL     string `json:"url"`
 }
 
 // Operation replica el shape genérico google.longrunning.Operation.
@@ -75,10 +118,89 @@ type Operation struct {
 type Svc struct {
 	db  *storage.DB
 	seq int64
+
+	// gov/containers back Phase 14's real-backend opt-in, mirroring
+	// Cloud Run's identical fields (internal/services/cloudrun.Svc): gov
+	// is the shared realbackend.Governor (nil in tests that don't
+	// exercise real execution, in which case opt-in requests silently
+	// stay shape-only). containers maps a governor ID to the live
+	// *dockerrun.Backend, kept in sync via SetOnEvict.
+	mu         sync.Mutex
+	gov        *realbackend.Governor
+	containers map[string]*dockerrun.Backend
 }
 
-func New(db *storage.DB) *Svc {
-	return &Svc{db: db}
+// New creates a Cloud Functions service. gov may be nil (e.g. in tests
+// that don't exercise Phase 14's real-execution opt-in); a nil Governor
+// simply means every function stays shape-only regardless of opt-in
+// headers, the same zero-cost-by-default behavior as before Phase 14.
+func New(db *storage.DB, gov *realbackend.Governor) *Svc {
+	s := &Svc{db: db, gov: gov, containers: map[string]*dockerrun.Backend{}}
+	if gov != nil {
+		gov.SetOnEvict(s.forgetReal)
+	}
+	return s
+}
+
+func (s *Svc) forgetReal(id string) {
+	s.mu.Lock()
+	delete(s.containers, id)
+	s.mu.Unlock()
+}
+
+func functionBackendID(name string) string { return "cloudfunctions:" + name }
+
+// tryStartReal attempts to back fn with a real Docker container running
+// fn.RealExecution.Image, when the caller opted in
+// (realbackend.WantsReal, checked against fn.Labels), RealExecution.Image
+// is actually set (Gen2 has no real image field of its own — see the
+// package doc comment), and Docker is reachable. On any failure this logs
+// and leaves fn exactly as shape-only as it would have been before
+// Phase 14.
+func (s *Svc) tryStartReal(r *http.Request, fn *Function) {
+	if s.gov == nil {
+		return
+	}
+	if !realbackend.WantsReal(r, fn.Labels) {
+		return
+	}
+	if fn.RealExecution == nil || fn.RealExecution.Image == "" {
+		log.Printf("cloudfunctions: %s pidió backend real pero no se especificó realExecution.image (Gen2 no expone un campo de imagen en la API real; es una extensión propia del emulador), sigue shape-only", fn.Name)
+		return
+	}
+	avail := realbackend.DetectDocker(r.Context())
+	if !avail.Available {
+		log.Printf("cloudfunctions: %s pidió backend real pero Docker no está disponible (%s), sigue shape-only", fn.Name, avail.Detail)
+		return
+	}
+	backend, err := dockerrun.Start(fn.RealExecution.Image, fn.ServiceConfig.EnvironmentVariables, 8080, 0)
+	if err != nil {
+		log.Printf("cloudfunctions: %s pidió backend real pero no se pudo iniciar el contenedor, sigue shape-only: %v", fn.Name, err)
+		return
+	}
+	id := functionBackendID(fn.Name)
+	admitted, evicted := s.gov.Admit(id, backend)
+	if !admitted {
+		log.Printf("cloudfunctions: %s pidió backend real pero el Governor lo rechazó (budget), sigue shape-only", fn.Name)
+		_ = backend.Stop()
+		return
+	}
+	for _, evID := range evicted {
+		log.Printf("cloudfunctions: backend real %q desalojado (LRU) para liberar espacio para %q", evID, id)
+	}
+	s.mu.Lock()
+	s.containers[id] = backend
+	s.mu.Unlock()
+	fn.RealEndpoint = &RealEndpoint{Backend: backend.Kind(), URL: backend.URL()}
+}
+
+// stopReal releases (and stops) any real container backing the named
+// function. Safe to call even when none is registered.
+func (s *Svc) stopReal(name string) {
+	if s.gov == nil {
+		return
+	}
+	s.gov.Release(functionBackendID(name))
 }
 
 // Register monta las rutas de Cloud Functions, siguiendo los paths
@@ -119,6 +241,7 @@ func (s *Svc) createFunction(w http.ResponseWriter, r *http.Request) {
 		BuildConfig   BuildConfig       `json:"buildConfig"`
 		ServiceConfig ServiceConfig     `json:"serviceConfig"`
 		Labels        map[string]string `json:"labels"`
+		RealExecution *RealExecution    `json:"realExecution"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
@@ -153,7 +276,9 @@ func (s *Svc) createFunction(w http.ResponseWriter, r *http.Request) {
 		Labels:        body.Labels,
 		CreateTime:    now,
 		UpdateTime:    now,
+		RealExecution: body.RealExecution,
 	}
+	s.tryStartReal(r, &fn)
 	if err := s.db.Put(bucketFunctions, fn.Name, fn); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
@@ -211,6 +336,7 @@ func (s *Svc) updateFunction(w http.ResponseWriter, r *http.Request) {
 		BuildConfig   *BuildConfig      `json:"buildConfig"`
 		ServiceConfig *ServiceConfig    `json:"serviceConfig"`
 		Labels        map[string]string `json:"labels"`
+		RealExecution *RealExecution    `json:"realExecution"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
@@ -230,6 +356,15 @@ func (s *Svc) updateFunction(w http.ResponseWriter, r *http.Request) {
 	if body.Labels != nil {
 		existing.Labels = body.Labels
 	}
+	if body.RealExecution != nil {
+		// A new image means any currently-running real container is
+		// stale — stop it before possibly starting a fresh one below.
+		// stopReal is a safe no-op if no real backend is registered yet.
+		s.stopReal(existing.Name)
+		existing.RealEndpoint = nil
+		existing.RealExecution = body.RealExecution
+		s.tryStartReal(r, &existing)
+	}
 	existing.UpdateTime = time.Now().UTC().Format(time.RFC3339)
 	if err := s.db.Put(bucketFunctions, existing.Name, existing); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
@@ -242,6 +377,7 @@ func (s *Svc) deleteFunction(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	location := r.PathValue("location")
 	name := functionName(project, location, r.PathValue("function"))
+	s.stopReal(name)
 	if err := s.db.Delete(bucketFunctions, name); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return

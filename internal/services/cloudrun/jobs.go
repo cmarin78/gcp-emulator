@@ -3,18 +3,31 @@
 // for batch/one-off workloads rather than request-serving ones. Reuses the
 // Container/EnvVar shapes already defined for services. The manual ":run"
 // action (used by gcloud run jobs execute and the provider's read-back of
-// executions) is a no-op that just records an execution count and
-// timestamp, matching the rest of this emulator's "shape-compatible, not
-// behavior-complete" philosophy: no real task execution happens.
+// executions) always records an execution count and timestamp, matching
+// the rest of this emulator's "shape-compatible, not behavior-complete"
+// philosophy by default.
+//
+// Phase 14 extends ":run" with an opt-in (internal/realbackend.WantsReal,
+// checked against the job's labels): when requested and Docker is
+// available, it actually runs template.template.containers[0].image to
+// completion via internal/realbackend/dockerrun.RunToCompletion — a
+// one-shot run, never admitted into the Governor, since a Job execution
+// isn't a long-running resource the way a Service is. On any failure (no
+// opt-in, Docker unavailable, the run itself failing to start) this falls
+// back to exactly the no-op behavior above.
 package cloudrun
 
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/realbackend"
+	"github.com/cesar/gcp-emulator/internal/realbackend/dockerrun"
 	"github.com/cesar/gcp-emulator/internal/server"
 )
 
@@ -240,9 +253,65 @@ func (s *Svc) jobAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.seq++
-	respBytes, _ := json.Marshal(map[string]string{"name": execName})
+
+	resp := map[string]any{"name": execName}
+	if realRun := s.tryRunReal(r, &job); realRun != nil {
+		resp["realRun"] = realRun
+	}
+	respBytes, _ := json.Marshal(resp)
 	op := Operation{Name: operationName(project, location, fmt.Sprintf("op-%d", s.seq)), Done: true, Response: respBytes}
 	server.WriteJSON(w, 200, op)
+}
+
+// RealRunResult is an emulator-only extension carried in the ":run"
+// operation's response (under "realRun") — not part of the real Cloud
+// Run Jobs API, which has no synchronous result to report since real
+// executions are asynchronous. It only appears when the job opted into
+// real execution (internal/realbackend.WantsReal) and Docker actually ran
+// the image.
+type RealRunResult struct {
+	ExitCode int    `json:"exitCode"`
+	Output   string `json:"output"`
+}
+
+// tryRunReal runs job's container image to completion via Docker when
+// the caller opted in (realbackend.WantsReal, checked against
+// job.Labels) and Docker is actually reachable. Returns nil — leaving the
+// ":run" response exactly as it was before Phase 14 — on any failure: no
+// opt-in, Docker unavailable, or the run itself failing to start. Unlike
+// Cloud Run Services' tryStartReal, this never touches the Governor: a
+// Job execution is a one-shot task, not a long-running resource.
+func (s *Svc) tryRunReal(r *http.Request, job *Job) *RealRunResult {
+	if !realbackend.WantsReal(r, job.Labels) {
+		return nil
+	}
+	if len(job.Template.Template.Containers) == 0 || job.Template.Template.Containers[0].Image == "" {
+		return nil
+	}
+	avail := realbackend.DetectDocker(r.Context())
+	if !avail.Available {
+		log.Printf("cloudrun: job %s pidió ejecución real pero Docker no está disponible (%s), sigue shape-only", job.Name, avail.Detail)
+		return nil
+	}
+	container := job.Template.Template.Containers[0]
+	timeout := jobRunTimeout(job.Template.Template.Timeout)
+	exitCode, output, err := dockerrun.RunToCompletion(container.Image, envMapOf(container.Env), timeout)
+	if err != nil {
+		log.Printf("cloudrun: job %s pidió ejecución real pero docker run falló, sigue shape-only: %v", job.Name, err)
+		return nil
+	}
+	return &RealRunResult{ExitCode: exitCode, Output: output}
+}
+
+// jobRunTimeout parses a protobuf-style Duration string (e.g. "600s", the
+// format TaskTemplate.Timeout uses) into a time.Duration, falling back to
+// dockerrun.DefaultRunTimeout when timeout is empty or unparseable.
+func jobRunTimeout(timeout string) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSuffix(timeout, "s"))
+	if err != nil || secs <= 0 {
+		return dockerrun.DefaultRunTimeout
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func (s *Svc) writeJobOperation(w http.ResponseWriter, project, location string, job Job) {
