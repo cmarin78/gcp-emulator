@@ -180,6 +180,11 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /compute/v1/projects/{project}/global/securityPolicies/{securityPolicy}", s.getSecurityPolicy)
 	mux.HandleFunc("DELETE /compute/v1/projects/{project}/global/securityPolicies/{securityPolicy}", s.deleteSecurityPolicy)
 	mux.HandleFunc("POST /compute/v1/projects/{project}/global/securityPolicies/{securityPolicy}/setLabels", s.setSecurityPolicyLabels)
+	// "{name}:evaluate" -- see evaluate.go's package doc comment for why
+	// this is a single wildcard segment split with strings.Cut instead of
+	// a literal ":" in the mux pattern (same technique as
+	// networkmanagement's connectivityTests:rerun).
+	mux.HandleFunc("POST /compute/v1/projects/{project}/global/securityPolicies/{securityPolicyAction}", s.securityPolicyAction)
 }
 
 func selfLink(project, kind, name string) string {

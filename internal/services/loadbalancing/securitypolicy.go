@@ -1,10 +1,13 @@
 // Phase 8 of the roadmap: Cloud Armor, modeled as the global
 // compute#securityPolicy resource. Direct extension of Load Balancing —
 // backendServices can reference a securityPolicy by selfLink (see the
-// SecurityPolicy field on BackendService in loadbalancing.go). Same
-// "shape-compatible, not behavior-complete" approach as the rest of this
-// package: no real traffic inspection or rule evaluation, just the
-// resource graph Terraform/gcloud expect.
+// SecurityPolicy field on BackendService in loadbalancing.go). CRUD here
+// stayed "shape-compatible, not behavior-complete" through Phase 10; Phase
+// 11 (see evaluate.go) added real rule evaluation against simulated
+// request attributes for the subset of match conditions this emulator can
+// actually evaluate without a CEL dependency (config.srcIpRanges) — CEL
+// expressions (match.expr) are still accepted and stored so Terraform
+// configs round-trip, but aren't evaluated.
 package loadbalancing
 
 import (
@@ -31,10 +34,38 @@ const bucketSecurityPolicies = "loadbalancing.securityPolicies"
 
 // SecurityPolicyRule mirrors the real API's nested rule shape.
 type SecurityPolicyRule struct {
-	Priority    int64           `json:"priority"`
-	Action      string          `json:"action"`
-	Description string          `json:"description,omitempty"`
-	Match       json.RawMessage `json:"match,omitempty"`
+	Priority    int64                    `json:"priority"`
+	Action      string                   `json:"action"`
+	Description string                   `json:"description,omitempty"`
+	Match       *SecurityPolicyRuleMatch `json:"match,omitempty"`
+	Preview     bool                     `json:"preview,omitempty"`
+}
+
+// SecurityPolicyRuleMatch mirrors the real API's nested match shape,
+// scoped to what evaluate.go can actually evaluate. Real Cloud Armor rules
+// match either via a fixed "versionedExpr" (SRC_IPS_V1) backed by
+// config.srcIpRanges, or an arbitrary CEL expression (expr.expression) —
+// the latter is accepted here so a real google_compute_security_policy_rule
+// using a CEL match round-trips through create/get/list, but evaluate.go
+// can't evaluate it (no CEL library, per this project's no-new-dependency
+// rule) and treats it as a non-match, same documented-boundary approach
+// Workflows' interpreter takes for non-JSON sourceContents.
+type SecurityPolicyRuleMatch struct {
+	VersionedExpr string                         `json:"versionedExpr,omitempty"`
+	Config        *SecurityPolicyRuleMatchConfig `json:"config,omitempty"`
+	Expr          *SecurityPolicyRuleExpr        `json:"expr,omitempty"`
+}
+
+// SecurityPolicyRuleMatchConfig mirrors compute#SecurityPolicyRuleMatcherConfig.
+type SecurityPolicyRuleMatchConfig struct {
+	SrcIpRanges []string `json:"srcIpRanges,omitempty"`
+}
+
+// SecurityPolicyRuleExpr mirrors compute#SecurityPolicyRuleMatcherExpr (a
+// CEL expression). Stored verbatim, never evaluated — see the type doc on
+// SecurityPolicyRuleMatch above.
+type SecurityPolicyRuleExpr struct {
+	Expression string `json:"expression,omitempty"`
 }
 
 // SecurityPolicy mirrors the real compute#securityPolicy resource (global).
