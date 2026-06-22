@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/realbackend"
 	"github.com/cesar/gcp-emulator/internal/realbackend/dockerrun"
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -150,6 +151,12 @@ func (s *Svc) forgetReal(id string) {
 
 func functionBackendID(name string) string { return "cloudfunctions:" + name }
 
+func (s *Svc) realBackendFor(name string) *dockerrun.Backend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.containers[functionBackendID(name)]
+}
+
 // tryStartReal attempts to back fn with a real Docker container running
 // fn.RealExecution.Image, when the caller opted in
 // (realbackend.WantsReal, checked against fn.Labels), RealExecution.Image
@@ -192,6 +199,16 @@ func (s *Svc) tryStartReal(r *http.Request, fn *Function) {
 	s.containers[id] = backend
 	s.mu.Unlock()
 	fn.RealEndpoint = &RealEndpoint{Backend: backend.Kind(), URL: backend.URL()}
+	// Phase 15: a real container coming up is real activity, surfaced
+	// through Cloud Logging the same way every Phase 11 real dispatch
+	// already is (RecordLog alongside the producer-side log.Printf
+	// above).
+	activity.RecordLog(activity.ProjectOf(fn.Name), activity.LogEntry{
+		LogName:     fmt.Sprintf("projects/%s/logs/cloudfunctions.googleapis.com%%2Freal_backend", activity.ProjectOf(fn.Name)),
+		Severity:    "INFO",
+		TextPayload: fmt.Sprintf("función %s: contenedor real iniciado (%s)", fn.Name, backend.URL()),
+		Resource:    map[string]any{"type": "cloud_function", "labels": map[string]string{"function_name": fn.Name}},
+	})
 }
 
 // stopReal releases (and stops) any real container backing the named
@@ -199,6 +216,15 @@ func (s *Svc) tryStartReal(r *http.Request, fn *Function) {
 func (s *Svc) stopReal(name string) {
 	if s.gov == nil {
 		return
+	}
+	if s.realBackendFor(name) != nil {
+		project := activity.ProjectOf(name)
+		activity.RecordLog(project, activity.LogEntry{
+			LogName:     fmt.Sprintf("projects/%s/logs/cloudfunctions.googleapis.com%%2Freal_backend", project),
+			Severity:    "INFO",
+			TextPayload: fmt.Sprintf("función %s: contenedor real detenido", name),
+			Resource:    map[string]any{"type": "cloud_function", "labels": map[string]string{"function_name": name}},
+		})
 	}
 	s.gov.Release(functionBackendID(name))
 }
@@ -314,7 +340,30 @@ func (s *Svc) getFunction(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 404, "NOT_FOUND", "función no encontrada")
 		return
 	}
+	s.pollRealMetrics(r, fn.Name)
 	server.WriteJSON(w, 200, fn)
+}
+
+// pollRealMetrics is Phase 15's source for real Cloud Functions metrics,
+// mirroring cloudrun.Svc.pollRealMetrics exactly: every GET of a
+// real-backed function queries the live container's CPU/memory via
+// `docker stats` and records both into internal/activity as GAUGEs. A
+// failed poll is logged and otherwise ignored — this must never break a
+// plain GET of the function.
+func (s *Svc) pollRealMetrics(r *http.Request, name string) {
+	backend := s.realBackendFor(name)
+	if backend == nil {
+		return
+	}
+	cpuFraction, memMB, err := backend.Stats(r.Context())
+	if err != nil {
+		log.Printf("cloudfunctions: no se pudieron leer métricas reales de %s: %v", name, err)
+		return
+	}
+	project := activity.ProjectOf(name)
+	labels := map[string]string{"function_name": name}
+	activity.RecordGauge(project, "cloudfunctions.googleapis.com/function/user_memory_bytes", labels, memMB*1024*1024)
+	activity.RecordGauge(project, "cloudfunctions.googleapis.com/function/cpu_utilizations", labels, cpuFraction)
 }
 
 func (s *Svc) updateFunction(w http.ResponseWriter, r *http.Request) {

@@ -120,3 +120,38 @@ func TestTimeSeriesReflectsRecordedActivity(t *testing.T) {
 		t.Fatalf("want cumulative value 2, got %+v", value)
 	}
 }
+
+// TestTimeSeriesReflectsGaugeMetrics covers Phase 15's real-backend
+// metrics: a gauge recorded via activity.RecordGauge (the path
+// cloudsql/cloudrun/cloudfunctions use after polling a real Postgres
+// engine or Docker container) must come back with metricKind=GAUGE and
+// valueType=DOUBLE, not the CUMULATIVE/INT64 shape every counter-based
+// series before it used.
+func TestTimeSeriesReflectsGaugeMetrics(t *testing.T) {
+	srv := newTestServer(t)
+	const project = "proj-ts-gauge"
+
+	activity.RecordGauge(project, "run.googleapis.com/container/cpu/utilizations",
+		map[string]string{"service_name": "svc1"}, 0.42)
+
+	var list struct {
+		TimeSeries []map[string]any `json:"timeSeries"`
+	}
+	status := testutil.DoJSON(t, "GET", srv.URL+"/v3/projects/"+project+"/timeSeries", nil, &list)
+	if status != 200 || len(list.TimeSeries) != 1 {
+		t.Fatalf("timeSeries: status=%d list=%+v", status, list.TimeSeries)
+	}
+	ts := list.TimeSeries[0]
+	if ts["metricKind"] != "GAUGE" || ts["valueType"] != "DOUBLE" {
+		t.Fatalf("want metricKind=GAUGE valueType=DOUBLE, got %+v", ts)
+	}
+	points, _ := ts["points"].([]any)
+	if len(points) != 1 {
+		t.Fatalf("want 1 point, got %+v", points)
+	}
+	p, _ := points[0].(map[string]any)
+	value, _ := p["value"].(map[string]any)
+	if dv, ok := value["doubleValue"].(float64); !ok || dv != 0.42 {
+		t.Fatalf("want doubleValue=0.42, got %+v", value)
+	}
+}

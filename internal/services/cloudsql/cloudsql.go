@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/realbackend"
 	"github.com/cesar/gcp-emulator/internal/realbackend/postgres"
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -208,6 +209,16 @@ func (s *Svc) tryStartReal(r *http.Request, project string, inst *DatabaseInstan
 		User:     "postgres",
 		Password: password,
 	}
+	// Phase 15: a real backend coming up is real activity, surfaced
+	// through Cloud Logging the same way every Phase 11 real dispatch
+	// already is (RecordLog alongside the producer-side log.Printf
+	// above).
+	activity.RecordLog(project, activity.LogEntry{
+		LogName:     fmt.Sprintf("projects/%s/logs/cloudsql.googleapis.com%%2Freal_backend", project),
+		Severity:    "INFO",
+		TextPayload: fmt.Sprintf("instancia %s: backend Postgres real iniciado en %s:%d", inst.Name, backend.Host(), backend.Port()),
+		Resource:    map[string]any{"type": "cloudsql_database", "labels": map[string]string{"database_id": project + ":" + inst.Name}},
+	})
 }
 
 func randomPassword() string {
@@ -388,7 +399,31 @@ func (s *Svc) getInstance(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 404, "NOT_FOUND", "instancia no encontrada")
 		return
 	}
+	s.pollRealMetrics(r, project, instance)
 	server.WriteJSON(w, 200, inst)
+}
+
+// pollRealMetrics is Phase 15's source for real Cloud SQL metrics: every
+// time someone actually checks on a real-backed instance (the same
+// "metrics get fresher when something looks at the resource" posture
+// used throughout this opt-in feature set), it queries the live embedded
+// Postgres engine's connection count and records it into internal/
+// activity as a GAUGE, so Cloud Monitoring's timeSeries.list reflects an
+// actual measurement instead of staying an empty stub. A failed poll
+// (engine briefly unreachable, etc.) is logged and otherwise ignored —
+// this must never break a plain GET of the instance.
+func (s *Svc) pollRealMetrics(r *http.Request, project, instance string) {
+	backend := s.realBackendFor(project, instance)
+	if backend == nil {
+		return
+	}
+	connections, err := backend.Stats(r.Context())
+	if err != nil {
+		log.Printf("cloudsql: no se pudieron leer métricas reales de %s/%s: %v", project, instance, err)
+		return
+	}
+	activity.RecordGauge(project, "cloudsql.googleapis.com/database/postgresql/num_backends",
+		map[string]string{"database_id": project + ":" + instance}, float64(connections))
 }
 
 func (s *Svc) patchInstance(w http.ResponseWriter, r *http.Request) {
@@ -434,6 +469,14 @@ func (s *Svc) deleteInstance(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	instance := r.PathValue("instance")
 	if s.gov != nil {
+		if s.realBackendFor(project, instance) != nil {
+			activity.RecordLog(project, activity.LogEntry{
+				LogName:     fmt.Sprintf("projects/%s/logs/cloudsql.googleapis.com%%2Freal_backend", project),
+				Severity:    "INFO",
+				TextPayload: fmt.Sprintf("instancia %s: backend Postgres real detenido", instance),
+				Resource:    map[string]any{"type": "cloudsql_database", "labels": map[string]string{"database_id": project + ":" + instance}},
+			})
+		}
 		s.gov.Release(realBackendID(project, instance))
 	}
 	if err := s.db.Delete(bucketInstances, instanceKey(project, instance)); err != nil {

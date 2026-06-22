@@ -643,6 +643,71 @@ Docker Go SDK.
   stats API for these real containers (the remaining item in the
   committed scope).
 
+### Phase 15 — Monitoring/Logging: real metrics from real backends
+
+Closes out the last item left open by Phase 13/14: Cloud Monitoring's
+`timeSeries` and Cloud Logging's `entries` now reflect what the real
+backends (embedded Postgres for Cloud SQL, Docker containers for Cloud
+Run/Functions) are actually doing, not just synthetic event counts. No
+new Go module dependency, same "shell out, poll on read" posture as the
+rest of the real-execution work.
+
+- **`internal/activity` gains a GAUGE metric kind alongside the existing
+  CUMULATIVE counter.** A new `RecordGauge(project, metricType, labels,
+  value)` stores each call's value directly (never accumulating, since
+  CPU%, memory, and connection counts can go down between samples, unlike
+  Phase 11's monotonic event counters). `TimeSeries.Kind` threads this
+  through; `ListTimeSeries` defaults to `"CUMULATIVE"` for any series
+  recorded purely via the pre-Phase-15 `IncrCounter` path, so every
+  existing caller's behavior is unchanged.
+- **`internal/services/monitoring`'s `listTimeSeries` now emits the
+  correct `metricKind`/`valueType`/value-key** (`GAUGE`/`DOUBLE`/
+  `doubleValue` vs. `CUMULATIVE`/`INT64`/`int64Value`) based on each
+  series' `Kind`, instead of always hardcoding the cumulative shape.
+- **`internal/realbackend/postgres.Backend.Stats(ctx)`** queries
+  `pg_stat_activity` on the existing maintenance connection to report a
+  live connection count — Cloud SQL's real metric source.
+- **`internal/realbackend/dockerrun.Backend.Stats(ctx)`** shells out to
+  `docker stats --no-stream` (a single one-shot snapshot, not the
+  streaming mode) to report live CPU (as a fraction of one core) and
+  resident memory — Cloud Run/Functions' real metric source.
+- **"Poll on read", not a background goroutine**: rather than adding
+  periodic polling or teaching the Governor about "project" (its backend
+  IDs carry no project field, and use three different formats across
+  cloudsql/cloudrun/cloudfunctions), each owning service's existing GET
+  handler (`getInstance`/`getService`/`getFunction`) opportunistically
+  calls its real backend's `Stats` and records the result via
+  `activity.RecordGauge`, using the project it already has in scope
+  (`r.PathValue("project")` for Cloud SQL, `activity.ProjectOf(name)` for
+  Cloud Run/Functions, since those resource names are already canonical
+  `projects/{p}/...` strings). Zero changes to
+  `realbackend.Governor`/`realbackend.Backend`, zero new imports between
+  cloudsql/cloudrun/cloudfunctions and monitoring/logging — everything
+  still flows exclusively through `internal/activity`, exactly as Phase
+  11 established.
+- **Real-backend start/stop now also logs**, via `activity.RecordLog`
+  alongside each service's existing `tryStartReal`/stop path, the same
+  shape Phase 11's real dispatch producers (Scheduler/Tasks/Pub/Sub) use —
+  so Cloud Logging shows a container/engine actually coming up or going
+  down, not just metric points.
+- **Fallback boundary, same shape as Phase 13/14**: a resource that never
+  opted into real execution sees no behavior change at all — no Governor,
+  no `Stats` call, no recorded gauge. A failed `Stats` call (Docker daemon
+  briefly unreachable, etc.) is logged and otherwise ignored; it never
+  fails the GET request that triggered the poll.
+- **Test coverage**: `internal/activity`'s gauge-vs-cumulative behavior
+  and `monitoring.listTimeSeries`'s GAUGE/DOUBLE shape are covered by
+  ordinary tests with no real backend dependency. Each of
+  cloudsql/cloudrun/cloudfunctions' end-to-end real-backend tests
+  (`EMULATOR_REAL_PG_TESTS=1`/`EMULATOR_REAL_DOCKER_TESTS=1`) now also
+  asserts that a GET against the real-backed resource populates
+  `internal/activity` with real gauge points and a real-backend log
+  entry.
+
+This closes out the full committed real-execution scope from Phase 12
+onward: Cloud SQL (Phase 13), Cloud Run/Functions (Phase 14), and now
+Monitoring/Logging fed from both (Phase 15).
+
 ### Decoupled add-on: network fabric, mini-routers, and GKE/k3d (proposed)
 
 These are the most expensive, most fragile-across-environments items
@@ -678,11 +743,11 @@ Phase 9, Phase 10, and Phase 11 (behavioral logic) are all done. Phase 12
 (foundation) is also done — `internal/realbackend` ships the `Backend`
 interface, per-resource opt-in, Docker detection, and the budget-aware
 governor, all with zero new Go module dependencies. Phase 13 (Cloud SQL
-real embedded Postgres) and Phase 14 (Cloud Run/Functions real Docker
-execution) are both implemented on top of that foundation. What's left
-of the committed scope is Monitoring/Logging metrics fed from all three
-real backends (embedded Postgres, and Docker containers for Cloud
-Run/Functions). The network/mini-router and GKE/k3d add-on is explicitly
+real embedded Postgres), Phase 14 (Cloud Run/Functions real Docker
+execution), and Phase 15 (Monitoring/Logging fed from all three real
+backends) are all implemented on top of that foundation — this closes
+out the full committed real-execution scope. The network/mini-router and
+GKE/k3d add-on is explicitly
 decoupled — build it opportunistically as a separate plug-in piece, never
 as a dependency the core relies on. MySQL and SQL Server real engines
 stay deferred to "if there's concrete demand," using

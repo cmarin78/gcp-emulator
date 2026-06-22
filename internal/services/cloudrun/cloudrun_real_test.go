@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/realbackend"
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
@@ -159,6 +161,28 @@ func TestRealServiceLifecycle(t *testing.T) {
 	}
 	if len(gov.Snapshot().Backends) != 1 {
 		t.Fatalf("expected exactly one admitted backend, got %+v", gov.Snapshot())
+	}
+
+	// Phase 15: the GET above already triggered pollRealMetrics against
+	// the real container, so CPU/memory GAUGE series should already be
+	// recorded for this project, alongside a real-backend start log entry.
+	cpu := activity.ListTimeSeries("proj1", "run.googleapis.com/container/cpu/utilizations")
+	mem := activity.ListTimeSeries("proj1", "run.googleapis.com/container/memory/utilizations")
+	if len(cpu) != 1 || cpu[0].Kind != "GAUGE" || len(cpu[0].Points) == 0 {
+		t.Fatalf("expected a GAUGE cpu series with points, got %+v", cpu)
+	}
+	if len(mem) != 1 || mem[0].Kind != "GAUGE" || len(mem[0].Points) == 0 {
+		t.Fatalf("expected a GAUGE memory series with points, got %+v", mem)
+	}
+	found := false
+	for _, e := range activity.ListLogs("proj1") {
+		if strings.Contains(e.TextPayload, "real") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected a real-backend log entry, got %+v", activity.ListLogs("proj1"))
 	}
 
 	status = testutil.DoJSON(t, "DELETE", srv.URL+"/v2/projects/proj1/locations/us-central1/services/real-svc", nil, new(Operation))

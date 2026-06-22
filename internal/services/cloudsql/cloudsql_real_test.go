@@ -4,8 +4,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/realbackend"
 	"github.com/cesar/gcp-emulator/internal/testutil"
 )
@@ -150,6 +152,21 @@ func TestRealPostgresLifecycle(t *testing.T) {
 		t.Fatalf("expected exactly one admitted backend, got %+v", gov.Snapshot())
 	}
 
+	// Phase 15: the GET above already triggered pollRealMetrics against
+	// the real embedded engine, so a real GAUGE connection-count metric
+	// should already be recorded for this project, and a real-backend
+	// start log entry should be present too.
+	series := activity.ListTimeSeries("proj1", "cloudsql.googleapis.com/database/postgresql/num_backends")
+	if len(series) != 1 || series[0].Kind != "GAUGE" {
+		t.Fatalf("expected one GAUGE num_backends series after GET, got %+v", series)
+	}
+	if len(series[0].Points) == 0 {
+		t.Fatalf("expected at least one recorded point, got %+v", series[0])
+	}
+	if !logsContainSubstring(activity.ListLogs("proj1"), "real") {
+		t.Fatalf("expected a real-backend log entry, got %+v", activity.ListLogs("proj1"))
+	}
+
 	status = testutil.DoJSON(t, "POST", srv.URL+"/sql/v1beta4/projects/proj1/instances/real-pg/databases", map[string]any{
 		"name": "appdb",
 	}, new(Operation))
@@ -172,4 +189,16 @@ func TestRealPostgresLifecycle(t *testing.T) {
 	if len(gov.Snapshot().Backends) != 0 {
 		t.Fatalf("expected instance deletion to release the real backend, got %+v", gov.Snapshot())
 	}
+}
+
+// logsContainSubstring reports whether any recorded log entry's
+// TextPayload contains substr. Small helper shared by the Phase 15
+// real-backend lifecycle assertions above.
+func logsContainSubstring(entries []activity.LogEntry, substr string) bool {
+	for _, e := range entries {
+		if strings.Contains(e.TextPayload, substr) {
+			return true
+		}
+	}
+	return false
 }

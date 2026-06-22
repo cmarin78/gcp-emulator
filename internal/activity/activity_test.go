@@ -59,3 +59,47 @@ func TestIncrCounterAccumulatesAndFilters(t *testing.T) {
 		t.Fatalf("expected no series for unmatched filter, got %+v", other)
 	}
 }
+
+// TestRecordGaugeOverwritesRatherThanAccumulates confirms Phase 15's
+// RecordGauge's defining difference from IncrCounter: each call stores
+// the given value directly, not last+1, since a CPU%/connection-count
+// measurement can go down between samples (unlike a monotonic event
+// count).
+func TestRecordGaugeOverwritesRatherThanAccumulates(t *testing.T) {
+	const project = "test-record-gauge"
+	const metricType = "cloudsql.googleapis.com/database/postgresql/num_backends"
+
+	RecordGauge(project, metricType, nil, 3)
+	RecordGauge(project, metricType, nil, 1)
+	RecordGauge(project, metricType, nil, 7)
+
+	series := ListTimeSeries(project, metricType)
+	if len(series) != 1 {
+		t.Fatalf("expected exactly one series, got %d: %+v", len(series), series)
+	}
+	ts := series[0]
+	if ts.Kind != "GAUGE" {
+		t.Fatalf("expected kind GAUGE, got %q", ts.Kind)
+	}
+	want := []float64{3, 1, 7}
+	if len(ts.Points) != len(want) {
+		t.Fatalf("expected %d points, got %d: %+v", len(want), len(ts.Points), ts.Points)
+	}
+	for i, p := range ts.Points {
+		if p.Value != want[i] {
+			t.Fatalf("point %d: want %v, got %v (gauge values must not accumulate)", i, want[i], p.Value)
+		}
+	}
+}
+
+// TestIncrCounterStillReportsCumulativeKind confirms Phase 15's addition
+// of a Kind field doesn't change IncrCounter-produced series' kind —
+// every pre-Phase-15 caller's series must still read back as CUMULATIVE.
+func TestIncrCounterStillReportsCumulativeKind(t *testing.T) {
+	const project = "test-counter-kind"
+	IncrCounter(project, "cloudscheduler.googleapis.com/job/execution_count", nil)
+	series := ListTimeSeries(project, "")
+	if len(series) != 1 || series[0].Kind != "CUMULATIVE" {
+		t.Fatalf("expected one CUMULATIVE series, got %+v", series)
+	}
+}

@@ -13,6 +13,7 @@
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -112,6 +113,29 @@ func (b *Backend) Exec(query string) error {
 	defer db.Close()
 	_, err = db.Exec(query)
 	return err
+}
+
+// Stats reports a live, instantaneous snapshot of this server's
+// connection load by querying pg_stat_activity on the maintenance
+// connection — Phase 15's source for real Cloud SQL metrics (replacing
+// the always-empty stub). connections is the number of backend processes
+// currently connected, across every database on this engine (this is a
+// single-tenant-per-instance embedded server, so that's the right scope:
+// there's no other Cloud SQL instance sharing it).
+func (b *Backend) Stats(ctx context.Context) (connections int, err error) {
+	if b == nil || b.engine == nil {
+		return 0, fmt.Errorf("postgres: backend sin motor")
+	}
+	db, err := sql.Open("postgres", b.dsn())
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	row := db.QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity")
+	if err := row.Scan(&connections); err != nil {
+		return 0, fmt.Errorf("postgres: no se pudo leer pg_stat_activity: %w", err)
+	}
+	return connections, nil
 }
 
 func freePort() (int, error) {

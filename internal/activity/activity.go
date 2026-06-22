@@ -39,16 +39,21 @@ type LogEntry struct {
 	InsertID    string            `json:"insertId,omitempty"`
 }
 
-// Point is one (timestamp, value) sample for a counter-style metric.
+// Point is one (timestamp, value) sample for a metric series.
 type Point struct {
 	Timestamp string  `json:"timestamp"`
 	Value     float64 `json:"value"`
 }
 
 // TimeSeries is a queryable (metricType, points) tuple, shaped closely
-// enough to monitoring.v3.TimeSeries for callers to adapt directly.
+// enough to monitoring.v3.TimeSeries for callers to adapt directly. Kind
+// is either "CUMULATIVE" (IncrCounter-produced series: monotonically
+// non-decreasing event counts) or "GAUGE" (RecordGauge-produced series:
+// an instantaneous measurement like CPU% or connection count, which can
+// go up or down between samples).
 type TimeSeries struct {
 	MetricType string  `json:"metricType"`
+	Kind       string  `json:"kind"`
 	Points     []Point `json:"points"`
 }
 
@@ -62,6 +67,7 @@ var (
 	mu     sync.Mutex
 	logs   = map[string][]LogEntry{} // project -> entries (oldest first, capped)
 	series = map[seriesKey][]Point{} // (project, metric, labels) -> points
+	kinds  = map[seriesKey]string{}  // (project, metric, labels) -> "CUMULATIVE"|"GAUGE"
 	seq    int64
 )
 
@@ -132,6 +138,32 @@ func IncrCounter(project, metricType string, labels map[string]string) {
 		pts = pts[len(pts)-maxSeriesPointsPerKey:]
 	}
 	series[key] = pts
+	kinds[key] = "CUMULATIVE"
+}
+
+// RecordGauge records one instantaneous measurement of a gauge-style
+// metric (e.g. "run.googleapis.com/container/cpu/utilization",
+// "cloudsql.googleapis.com/database/postgresql/num_backends") at the
+// current time, for the given project/labels. Unlike IncrCounter, value
+// is stored as given — it is not added to the previous sample — matching
+// real Cloud Monitoring's GAUGE metric kind: a Docker container's CPU% or
+// a Postgres connection count can go up or down between polls, not just
+// accumulate. This is Phase 15's primitive for real-backend-sourced
+// metrics, feeding the exact same activity/listTimeSeries pipeline Phase
+// 11 built for real trigger counts.
+func RecordGauge(project, metricType string, labels map[string]string, value float64) {
+	if project == "" {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	key := seriesKey{project: project, metricType: metricType, labelsKey: labelsKey(labels)}
+	pts := append(series[key], Point{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Value: value})
+	if len(pts) > maxSeriesPointsPerKey {
+		pts = pts[len(pts)-maxSeriesPointsPerKey:]
+	}
+	series[key] = pts
+	kinds[key] = "GAUGE"
 }
 
 // ListTimeSeries returns all recorded series for a project whose metric
@@ -147,7 +179,11 @@ func ListTimeSeries(project, metricTypeContains string) []TimeSeries {
 		if metricTypeContains != "" && !strings.Contains(key.metricType, metricTypeContains) {
 			continue
 		}
-		out = append(out, TimeSeries{MetricType: key.metricType, Points: append([]Point{}, pts...)})
+		kind := kinds[key]
+		if kind == "" {
+			kind = "CUMULATIVE"
+		}
+		out = append(out, TimeSeries{MetricType: key.metricType, Kind: kind, Points: append([]Point{}, pts...)})
 	}
 	return out
 }

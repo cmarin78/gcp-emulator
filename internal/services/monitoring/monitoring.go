@@ -213,6 +213,13 @@ func metricTypeFromFilter(filter string) string {
 	return rest[:end]
 }
 
+// listTimeSeries traduce internal/activity's recorded series a la forma
+// de monitoring.v3.TimeSeries. Desde la Fase 15, una serie puede ser
+// CUMULATIVE (IncrCounter — conteos de eventos reales de Scheduler/Tasks/
+// Pub/Sub, siempre INT64) o GAUGE (RecordGauge — mediciones reales de los
+// backends de Cloud SQL/Cloud Run/Cloud Functions como CPU%, memoria o
+// conexiones activas, siempre DOUBLE porque pueden subir y bajar entre
+// muestras). ts.Kind ya viene resuelto desde activity.ListTimeSeries.
 func (s *Svc) listTimeSeries(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	metricType := metricTypeFromFilter(r.URL.Query().Get("filter"))
@@ -220,18 +227,28 @@ func (s *Svc) listTimeSeries(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]map[string]any, 0, len(series))
 	for _, ts := range series {
+		valueType := "INT64"
+		if ts.Kind == "GAUGE" {
+			valueType = "DOUBLE"
+		}
 		points := make([]map[string]any, 0, len(ts.Points))
 		for _, p := range ts.Points {
+			var value map[string]any
+			if valueType == "DOUBLE" {
+				value = map[string]any{"doubleValue": p.Value}
+			} else {
+				value = map[string]any{"int64Value": fmt.Sprintf("%d", int64(p.Value))}
+			}
 			points = append(points, map[string]any{
 				"interval": map[string]any{"endTime": p.Timestamp},
-				"value":    map[string]any{"int64Value": fmt.Sprintf("%d", int64(p.Value))},
+				"value":    value,
 			})
 		}
 		out = append(out, map[string]any{
 			"metric":     map[string]any{"type": ts.MetricType},
 			"resource":   map[string]any{"type": "global"},
-			"metricKind": "CUMULATIVE",
-			"valueType":  "INT64",
+			"metricKind": ts.Kind,
+			"valueType":  valueType,
 			"points":     points,
 		})
 	}

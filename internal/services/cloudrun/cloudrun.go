@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/activity"
 	"github.com/cesar/gcp-emulator/internal/realbackend"
 	"github.com/cesar/gcp-emulator/internal/realbackend/dockerrun"
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -190,6 +191,16 @@ func (s *Svc) tryStartReal(r *http.Request, svc *Service) {
 	s.containers[id] = backend
 	s.mu.Unlock()
 	svc.RealEndpoint = &RealEndpoint{Backend: backend.Kind(), URL: backend.URL()}
+	// Phase 15: a real container coming up is real activity, surfaced
+	// through Cloud Logging the same way every Phase 11 real dispatch
+	// already is (RecordLog alongside the producer-side log.Printf
+	// above).
+	activity.RecordLog(activity.ProjectOf(svc.Name), activity.LogEntry{
+		LogName:     fmt.Sprintf("projects/%s/logs/run.googleapis.com%%2Freal_backend", activity.ProjectOf(svc.Name)),
+		Severity:    "INFO",
+		TextPayload: fmt.Sprintf("servicio %s: contenedor real iniciado (%s)", svc.Name, backend.URL()),
+		Resource:    map[string]any{"type": "cloud_run_revision", "labels": map[string]string{"service_name": svc.Name}},
+	})
 }
 
 // stopReal releases (and stops) any real container backing the named
@@ -198,6 +209,15 @@ func (s *Svc) tryStartReal(r *http.Request, svc *Service) {
 func (s *Svc) stopReal(name string) {
 	if s.gov == nil {
 		return
+	}
+	if s.realBackendFor(name) != nil {
+		project := activity.ProjectOf(name)
+		activity.RecordLog(project, activity.LogEntry{
+			LogName:     fmt.Sprintf("projects/%s/logs/run.googleapis.com%%2Freal_backend", project),
+			Severity:    "INFO",
+			TextPayload: fmt.Sprintf("servicio %s: contenedor real detenido", name),
+			Resource:    map[string]any{"type": "cloud_run_revision", "labels": map[string]string{"service_name": name}},
+		})
 	}
 	s.gov.Release(serviceBackendID(name))
 }
@@ -339,7 +359,32 @@ func (s *Svc) getService(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 404, "NOT_FOUND", "servicio no encontrado")
 		return
 	}
+	s.pollRealMetrics(r, svc.Name)
 	server.WriteJSON(w, 200, svc)
+}
+
+// pollRealMetrics is Phase 15's source for real Cloud Run metrics: every
+// time someone actually checks on a real-backed service (the same "poll
+// on read" posture cloudsql.pollRealMetrics uses), it queries the live
+// container's CPU/memory via `docker stats` and records both into
+// internal/activity as GAUGEs, so Cloud Monitoring's timeSeries.list
+// reflects an actual measurement instead of staying an empty stub. A
+// failed poll is logged and otherwise ignored — this must never break a
+// plain GET of the service.
+func (s *Svc) pollRealMetrics(r *http.Request, name string) {
+	backend := s.realBackendFor(name)
+	if backend == nil {
+		return
+	}
+	cpuFraction, memMB, err := backend.Stats(r.Context())
+	if err != nil {
+		log.Printf("cloudrun: no se pudieron leer métricas reales de %s: %v", name, err)
+		return
+	}
+	project := activity.ProjectOf(name)
+	labels := map[string]string{"service_name": name}
+	activity.RecordGauge(project, "run.googleapis.com/container/cpu/utilizations", labels, cpuFraction)
+	activity.RecordGauge(project, "run.googleapis.com/container/memory/utilizations", labels, memMB)
 }
 
 func (s *Svc) updateService(w http.ResponseWriter, r *http.Request) {

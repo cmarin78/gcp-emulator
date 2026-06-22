@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -128,6 +129,85 @@ func (b *Backend) URL() string { return fmt.Sprintf("http://127.0.0.1:%d", b.hos
 // ContainerID is the docker-assigned container ID, exposed only for
 // logging/diagnostics.
 func (b *Backend) ContainerID() string { return b.containerID }
+
+// statsTimeout bounds the single `docker stats --no-stream` invocation
+// Stats makes — this runs synchronously inside an HTTP handler (Phase
+// 15's poll-on-GET design), so it must fail fast rather than risk
+// stalling a request if the daemon is slow/unresponsive.
+const statsTimeout = 5 * time.Second
+
+// Stats reports a live, instantaneous snapshot of this container's
+// resource usage by shelling out to `docker stats --no-stream`, Phase
+// 15's source for real Cloud Run/Cloud Functions metrics (replacing the
+// always-empty stub). cpuFraction is CPU usage as a fraction of one core
+// (e.g. 0.42 means 42% of one core; can exceed 1 for a multi-threaded
+// container), and memMB is resident memory in megabytes. Safe to call
+// often: a single `docker stats` invocation against one container is
+// cheap, unlike streaming mode.
+func (b *Backend) Stats(ctx context.Context) (cpuFraction float64, memMB float64, err error) {
+	if b == nil || b.containerID == "" {
+		return 0, 0, fmt.Errorf("dockerrun: backend sin contenedor")
+	}
+	statsCtx, cancel := context.WithTimeout(ctx, statsTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(statsCtx, "docker", "stats", b.containerID,
+		"--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}").Output()
+	if err != nil {
+		return 0, 0, fmt.Errorf("docker stats falló para %q: %w", b.containerID, err)
+	}
+	fields := strings.SplitN(strings.TrimSpace(string(out)), "|", 2)
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("docker stats: salida inesperada %q", string(out))
+	}
+	cpuFraction, err = parseCPUPercent(fields[0])
+	if err != nil {
+		return 0, 0, err
+	}
+	memMB, err = parseMemUsageMB(fields[1])
+	if err != nil {
+		return 0, 0, err
+	}
+	return cpuFraction, memMB, nil
+}
+
+// parseCPUPercent converts docker stats' "12.34%" CPUPerc column into a
+// fraction of one core (0.1234).
+func parseCPUPercent(s string) (float64, error) {
+	s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "%"))
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("docker stats: CPUPerc inválido %q: %w", s, err)
+	}
+	return v / 100, nil
+}
+
+// parseMemUsageMB converts docker stats' "12.5MiB / 1.952GiB" MemUsage
+// column into megabytes, using only the numerator (current usage).
+func parseMemUsageMB(s string) (float64, error) {
+	usage := strings.TrimSpace(strings.SplitN(s, "/", 2)[0])
+	for _, unit := range []struct {
+		suffix string
+		toMB   float64
+	}{
+		{"GiB", 1024},
+		{"MiB", 1},
+		{"KiB", 1.0 / 1024},
+		{"GB", 1000},
+		{"MB", 1},
+		{"KB", 1.0 / 1000},
+		{"B", 1.0 / (1024 * 1024)},
+	} {
+		if strings.HasSuffix(usage, unit.suffix) {
+			num := strings.TrimSuffix(usage, unit.suffix)
+			v, err := strconv.ParseFloat(strings.TrimSpace(num), 64)
+			if err != nil {
+				return 0, fmt.Errorf("docker stats: MemUsage inválido %q: %w", usage, err)
+			}
+			return v * unit.toMB, nil
+		}
+	}
+	return 0, fmt.Errorf("docker stats: no se reconoce la unidad de MemUsage %q", usage)
+}
 
 func waitForPort(port int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
