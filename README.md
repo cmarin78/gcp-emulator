@@ -403,6 +403,14 @@ resource "google_kms_crypto_key" "default" {
 under the hood (the key ring/crypto key resources themselves are never
 deleted, matching real GCP behavior).
 
+The examples above only exercise the emulator's shape-only mode. For a
+worked example that opts into the real-execution backends (Phases 12-15 —
+a real embedded Postgres engine for Cloud SQL, a real Docker container for
+Cloud Run) through plain, unpatched Terraform HCL, see
+[`examples/terraform-real-poc/`](examples/terraform-real-poc/main.tf) and
+the actual `init`/`plan`/`apply`/`destroy` run results in
+[`TERRAFORM_REAL_POC.md`](TERRAFORM_REAL_POC.md).
+
 ## Trying it without gcloud (curl)
 
 ```bash

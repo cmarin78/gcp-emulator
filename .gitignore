@@ -9,3 +9,9 @@
 .vscode/
 *.log
 node_modules/
+
+# Terraform local state/cache (the POC's .tfstate can contain plaintext
+# secrets like the demo DB password -- never commit it)
+**/.terraform/
+*.tfstate
+*.tfstate.backup
