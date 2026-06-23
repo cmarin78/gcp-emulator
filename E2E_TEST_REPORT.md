@@ -1,92 +1,90 @@
-# Reporte de pruebas E2E: gcloud CLI + Terraform
+# E2E Test Report: gcloud CLI + Terraform
 
-Fecha: 2026-06-17
-Entorno: emulador local (`bin\e2e-test.exe`, efímero, puerto 8999), gcloud CLI real, Terraform real (`hashicorp/google` v7.37.0).
+Date: 2026-06-17
+Environment: local emulator (`bin\e2e-test.exe`, ephemeral, port 8999), real gcloud CLI, real Terraform (`hashicorp/google` v7.37.0).
 
-## Resumen
+## Summary
 
-Ambas pruebas (gcloud CLI y Terraform) terminaron en verde. Se encontraron y
-corrigieron 3 bugs reales en el emulador durante el proceso. No queda ningún
-residuo de las pruebas: binario, base de datos, configuración de gcloud y
-directorio temporal fueron eliminados; `git status --short` solo muestra los
-3 archivos de código corregidos.
+Both tests (gcloud CLI and Terraform) finished green. 3 real bugs in the
+emulator were found and fixed along the way. No leftovers remain from
+testing: the binary, database, gcloud configuration, and temp directory
+were all removed; `git status --short` only shows the 3 fixed code files.
 
-## Pruebas con gcloud CLI
+## gcloud CLI tests
 
-Configuración aislada (`gcloud config configurations create emulator-e2e-test`)
-para no tocar la configuración real del usuario.
+Isolated configuration (`gcloud config configurations create emulator-e2e-test`)
+to avoid touching the user's real configuration.
 
-| Servicio | Comandos probados | Resultado |
+| Service | Commands tested | Result |
 |---|---|---|
-| Storage | `buckets create/list`, upload/download de objeto | OK |
-| Compute | `instances create/list/delete`, `instances stop/start` | OK (tras fix) |
+| Storage | `buckets create/list`, object upload/download | OK |
+| Compute | `instances create/list/delete`, `instances stop/start` | OK (after fix) |
 | Compute | `networks create/list/delete` | OK |
 | IAM | `service-accounts create/list/delete` | OK |
 
-## Pruebas con Terraform
+## Terraform tests
 
-Config en `tmp-e2e/tf/main.tf` (efímero), cubriendo las 6 fases del roadmap:
+Config in `tmp-e2e/tf/main.tf` (ephemeral), covering the roadmap's 6 phases:
 `google_compute_network` + `google_compute_instance`, `google_cloud_run_v2_service`,
 `google_bigquery_dataset` + `google_bigquery_table`, `google_kms_key_ring` +
 `google_kms_crypto_key`, `google_pubsub_topic` + `google_pubsub_subscription`,
 `google_artifact_registry_repository`.
 
-`terraform init` → `apply` → `destroy`: los 10 recursos se crearon y
-destruyeron correctamente (KMS sin endpoint de delete, igual que en la API
-real). `terraform apply`/`destroy` limpios, sin parches al provider.
+`terraform init` → `apply` → `destroy`: all 10 resources were created and
+destroyed correctly (KMS has no delete endpoint, matching the real API).
+`terraform apply`/`destroy` ran clean, no provider patches required.
 
-## Bugs encontrados y corregidos
+## Bugs found and fixed
 
-### 1. Fingerprint inválido en base64 (Compute)
-Los campos `labelFingerprint`/`metadataFingerprint`/`tagsFingerprint` no
-generaban base64 válido, lo cual rompía algunos clientes que los decodifican.
-Corregido con un helper `fakeFingerprint(seed)` consistente.
+### 1. Invalid base64 fingerprint (Compute)
+The `labelFingerprint`/`metadataFingerprint`/`tagsFingerprint` fields weren't
+generating valid base64, which broke clients that decode them. Fixed with a
+consistent `fakeFingerprint(seed)` helper.
 
-### 2. `gcloud compute instances stop/start`: selfLink relativo
-**Síntoma:** `UnknownCollectionException: unknown collection for [...]`.
-**Causa:** el parser de recursos de gcloud (`resources.Parse`, sin
-`collection=`) exige una URL absoluta para resolver la operación devuelta;
-el emulador devolvía un `selfLink` relativo.
-**Fix:** nuevo helper `opsBase(r)` en `network.go` que construye el prefijo
-absoluto (`scheme://host/compute/v1`) a partir del propio `http.Request`,
-aplicado en los 11 puntos donde se construye un `Operation`
-(`compute.go`, `network.go`).
+### 2. `gcloud compute instances stop/start`: relative selfLink
+**Symptom:** `UnknownCollectionException: unknown collection for [...]`.
+**Cause:** gcloud's resource parser (`resources.Parse`, without
+`collection=`) requires an absolute URL to resolve the returned operation;
+the emulator was returning a relative `selfLink`.
+**Fix:** new `opsBase(r)` helper in `network.go` that builds the absolute
+prefix (`scheme://host/compute/v1`) from the `http.Request` itself, applied
+at all 11 places where an `Operation` is built (`compute.go`, `network.go`).
 
-### 3. Falta el endpoint `operations/{operation}/wait` (Compute)
-**Síntoma:** tras corregir el bug #2, gcloud resolvía la URL absoluta y
-llamaba a `POST .../operations/{operation}/wait`, que no existía →
+### 3. Missing `operations/{operation}/wait` endpoint (Compute)
+**Symptom:** after fixing bug #2, gcloud resolved the absolute URL and
+called `POST .../operations/{operation}/wait`, which didn't exist →
 `HTTPError 404`.
-**Fix:** 3 nuevas rutas (`zone`/`region`/`global`) reutilizando el handler
-existente `getOperation`.
+**Fix:** 3 new routes (`zone`/`region`/`global`) reusing the existing
+`getOperation` handler.
 
-Ciclo completo verificado con gcloud real: `create → stop → start → list → delete`.
+Full cycle verified with real gcloud: `create → stop → start → list → delete`.
 
-### 4. Artifact Registry: `repositoryId` no aceptaba `repository_id`
-**Síntoma:** `terraform apply` fallaba con `repositoryId es requerido` aunque
-el parámetro venía en la query string.
-**Causa:** el provider de Terraform envía el query param como
-`repository_id` (snake_case); el emulador solo aceptaba `repositoryId`
-(camelCase). La API real de Artifact Registry acepta ambas formas.
-**Fix:** `createRepository` ahora hace fallback a `repository_id` si
-`repositoryId` viene vacío.
+### 4. Artifact Registry: `repositoryId` didn't accept `repository_id`
+**Symptom:** `terraform apply` failed with `repositoryId is required` even
+though the parameter was present in the query string.
+**Cause:** Terraform's provider sends the query param as `repository_id`
+(snake_case); the emulator only accepted `repositoryId` (camelCase). The
+real Artifact Registry API accepts both forms.
+**Fix:** `createRepository` now falls back to `repository_id` if
+`repositoryId` is empty.
 
-## Limitaciones conocidas (no son bugs, documentadas)
+## Known limitations (not bugs, documented)
 
-- `gcloud storage cp` con upload resumable no está soportado (el emulador
-  solo implementa `uploadType=media`).
-- `gcloud storage rm` no funciona sobre buckets; hay que usar
-  `gcloud storage buckets delete`.
-- `google_cloud_run_v2_service` requiere `deletion_protection = false` en
-  el `.tf` para permitir `terraform destroy` — es un guard del propio
-  provider, no del emulador (mismo comportamiento contra GCP real).
+- `gcloud storage cp` with resumable upload is not supported (the emulator
+  only implements `uploadType=media`).
+- `gcloud storage rm` doesn't work on buckets; use
+  `gcloud storage buckets delete` instead.
+- `google_cloud_run_v2_service` requires `deletion_protection = false` in
+  the `.tf` to allow `terraform destroy` — this is a guard from the
+  provider itself, not the emulator (same behavior against real GCP).
 
-## Archivos modificados
+## Files modified
 
 - `internal/services/compute/compute.go`
 - `internal/services/compute/network.go`
 - `internal/services/artifactregistry/artifactregistry.go`
 
-## Verificación de limpieza
+## Cleanup verification
 
 ```
 git status --short
@@ -95,41 +93,40 @@ git status --short
  M internal/services/compute/network.go
 ```
 
-Sin archivos nuevos, sin binarios, sin bases de datos, sin configuraciones de
-gcloud residuales.
+No new files, no binaries, no databases, no leftover gcloud configurations.
 
-## Anexo: Fase 7 (Resource Manager, Scheduler, Tasks, DNS, Load Balancing)
+## Annex: Phase 7 (Resource Manager, Scheduler, Tasks, DNS, Load Balancing)
 
-Fecha: 2026-06-18
-Entorno: mismo binario efímero (`bin\e2e-test.exe`, puerto 8999), probado vía
-PowerShell `Invoke-RestMethod` directamente en la máquina del usuario (el
-sandbox de esta sesión no tiene toolchain de Go ni red de salida utilizable).
+Date: 2026-06-18
+Environment: same ephemeral binary (`bin\e2e-test.exe`, port 8999), tested via
+PowerShell `Invoke-RestMethod` directly on the user's machine (this
+session's sandbox has no usable Go toolchain or outbound network).
 
-### Resumen
+### Summary
 
-Las 5 fases del roadmap nuevo se probaron de punta a punta con resultado
-verde a la primera, sin bugs. A diferencia de las pruebas de fases 1-6 (3
-bugs encontrados), esta vez no se encontró ningún defecto.
+All 5 phases of the new roadmap were tested end to end with a clean first
+pass, no bugs. Unlike the phase 1-6 tests (3 bugs found), no defects were
+found this time.
 
-| Servicio | Flujo probado | Resultado |
+| Service | Flow tested | Result |
 |---|---|---|
 | Resource Manager | create + get project | OK |
-| Cloud Scheduler | create job, `:run`, get (timestamps actualizados) | OK |
-| Cloud Tasks | create queue, create task (`task-1` autogenerado), list tasks, `:pause` | OK |
-| Cloud DNS | create zone (nameservers sintetizados), create change (additions), list rrsets | OK |
-| Load Balancing | healthCheck → backendService → urlMap → targetHttpProxy → forwardingRule (cada insert devuelve `Operation` estilo Compute con `selfLink`), GETs de verificación | OK |
+| Cloud Scheduler | create job, `:run`, get (updated timestamps) | OK |
+| Cloud Tasks | create queue, create task (auto-generated `task-1`), list tasks, `:pause` | OK |
+| Cloud DNS | create zone (synthesized nameservers), create change (additions), list rrsets | OK |
+| Load Balancing | healthCheck → backendService → urlMap → targetHttpProxy → forwardingRule (each insert returns a Compute-style `Operation` with `selfLink`), verification GETs | OK |
 
-Load Balancing es el caso más relevante: reutiliza el `Operation` propio de
-Compute (no el `google.longrunning.Operation` simple de los otros cuatro
-servicios), y el build + las pruebas confirmaron que las 24 rutas registradas
-no chocan entre sí en el `http.ServeMux` real (algo que antes solo se había
-revisado manualmente).
+Load Balancing is the most relevant case: it reuses Compute's own
+`Operation` (not the simple `google.longrunning.Operation` used by the
+other four services), and the build + tests confirmed the 24 registered
+routes don't collide with each other on the real `http.ServeMux` (something
+that had previously only been checked manually).
 
-### Bugs encontrados
+### Bugs found
 
-Ninguno.
+None.
 
-### Verificación de limpieza
+### Cleanup verification
 
 ```
 git status --short
@@ -147,8 +144,8 @@ git status --short
 ?? internal/services/resourcemanager/
 ```
 
-Sin binario ni base de datos residual (`bin\e2e-test.exe` y
-`data\e2e-test.db` eliminados tras la prueba).
+No leftover binary or database (`bin\e2e-test.exe` and
+`data\e2e-test.db` removed after testing).
 
 ## Annex: Phase 8 (Cloud Build, networking extensions, Cloud Armor, Memorystore, Cloud Spanner, GKE)
 
