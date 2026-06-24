@@ -708,6 +708,59 @@ This closes out the full committed real-execution scope from Phase 12
 onward: Cloud SQL (Phase 13), Cloud Run/Functions (Phase 14), and now
 Monitoring/Logging fed from both (Phase 15).
 
+## Phase 16: Cloud Asset Inventory, Cloud Run Domain Mappings, Cloud Tasks retry/backoff ✅
+
+Three independent, smaller additions picked up after the real-execution
+work (Phase 12-15) closed out, continuing service-surface growth rather
+than real-backend depth:
+
+| Service | Minimum resources | Depends on | Why | Effort | Status |
+|---|---|---|---|---|---|
+| Cloud Asset Inventory | `searchAllResources` (read-only, scoped to a project) | Reads existing buckets from Compute, Cloud SQL, Cloud Run, Pub/Sub, IAM directly | `gcloud asset search-all-resources` and the client libraries are a common "what do I actually have" check; a read-only index over what's already emulated is high value for near-zero new state to maintain. | M | ✅ |
+| Cloud Run Domain Mappings | `domainmappings` (CRUD under `domains.cloudrun.com/v1`) | `internal/services/cloudrun` | The one Cloud Run resource still exposed via the older Knative-shaped surface instead of `run.googleapis.com/v2`; needed for `google_cloud_run_domain_mapping` in Terraform and `gcloud run domain-mappings`. | S | ✅ |
+| Cloud Tasks retry/backoff | `queues.retryConfig` (maxAttempts/minBackoff/maxBackoff honored by dispatch) | `internal/services/cloudtasks` (Phase 11's real dispatch) | Phase 11 made `httpRequest` dispatch real but only ever tried once; a failing endpoint should actually retry with backoff like the real API, not just log one failure forever. | S | ✅ |
+
+Implementation notes:
+
+- **Cloud Asset Inventory** (`internal/services/assetinventory`) is a new
+  package with no resources of its own — it reads `compute.instances`,
+  `cloudsql.instances`, `cloudrun.services`, `pubsub.topics`, and
+  `iam.service_accounts` directly (the same avoid-an-import-cycle technique
+  `billingbudgets/spend.go` and `internal/iamenforce` already use), and
+  exposes a single `GET /v1/projects/{project}:searchAllResources` route
+  with optional `query` (free-text substring) and `assetTypes` (repeated)
+  filters. This is deliberately a representative cross-section, not every
+  emulated service — the same "good enough for real workflows, not a 1:1
+  reimplementation" scoping `spend.go`'s pricing table already uses.
+- **Domain Mappings** (`internal/services/cloudrun/domainmappings.go`)
+  registers `/apis/domains.cloudrun.com/v1/namespaces/{namespace}/domainmappings`
+  alongside the existing `run.googleapis.com/v2` routes in the same
+  package/mux — no route collision, since the path prefix is entirely
+  distinct. Mutations resolve synchronously and already-verified (no real
+  DNS check), consistent with `Service.TerminalCondition`'s existing
+  shortcut elsewhere in this package.
+- **Cloud Tasks retry/backoff** (`internal/services/cloudtasks`):
+  `dispatchTask` now takes the owning queue's `*RetryConfig` and loops up
+  to `maxAttempts` (default 5), sleeping an exponentially-doubling backoff
+  (default min 100ms / max 10s, both overridable per queue) between
+  failures. Only the final outcome — success, or exhausting retries — is
+  recorded as a terminal Cloud Logging entry; intermediate attempts only
+  bump `dispatchCount`/the attempt-count metric, matching the real API's
+  posture that retries are an implementation detail.
+
+Verified 2026-06-24: `go build ./...`, `go vet ./...`, and `go test ./... -race`
+all pass on the user's machine, including the new package tests
+(`internal/services/assetinventory`, `internal/services/cloudrun`'s
+domain-mapping tests, `internal/services/cloudtasks`'s retry tests). One
+bug was caught and fixed during this run: the initial
+`searchAllResources` route registered `"GET /v1/projects/{project}:searchAllResources"`,
+which panics at startup — Go's `http.ServeMux` wildcards must be an entire
+path segment, they can't have a `:verb` suffix. Fixed by registering
+`"GET /v1/projects/{projectAction}"` and splitting on `:` inside the
+handler via `strings.Cut`, the same pattern this codebase already uses for
+Cloud Tasks' `queueAction` (`:pause`/`:resume`) and Cloud Scheduler/Secret
+Manager's verb-suffixed routes.
+
 ### Decoupled add-on: network fabric, mini-routers, and GKE/k3d (proposed)
 
 These are the most expensive, most fragile-across-environments items

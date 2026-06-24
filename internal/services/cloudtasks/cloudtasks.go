@@ -6,6 +6,12 @@
 // respetando scheduleTime si está en el futuro, sin depender de Docker ni de
 // ninguna dependencia nueva. appEngineHttpRequest sigue siendo solo shape
 // (App Engine no está emulado).
+//
+// Fase 16: dispatchTask ahora respeta retryConfig de la queue (maxAttempts/
+// minBackoff/maxBackoff) en vez de intentar el HTTP request una sola vez:
+// una respuesta de error (status >= 400) o un fallo de transporte se
+// reintenta con backoff exponencial hasta maxAttempts, igual que la API
+// real, en vez de quedarse en un solo intento fallido para siempre.
 package cloudtasks
 
 import (
@@ -28,10 +34,20 @@ const (
 	bucketTasks  = "cloudtasks.tasks"
 )
 
+// RetryConfig mirrors the relevant subset of cloudtasks#RetryConfig. All
+// fields are optional in the real API; zero values fall back to the
+// defaults in defaultRetryConfig.
+type RetryConfig struct {
+	MaxAttempts int    `json:"maxAttempts,omitempty"`
+	MinBackoff  string `json:"minBackoff,omitempty"` // e.g. "0.100s", parsed with time.ParseDuration
+	MaxBackoff  string `json:"maxBackoff,omitempty"` // e.g. "3600s"
+}
+
 // Queue replica el recurso "Queue".
 type Queue struct {
-	Name  string `json:"name"` // projects/{p}/locations/{l}/queues/{q}
-	State string `json:"state"`
+	Name        string       `json:"name"` // projects/{p}/locations/{l}/queues/{q}
+	State       string       `json:"state"`
+	RetryConfig *RetryConfig `json:"retryConfig,omitempty"`
 }
 
 // Task replica el recurso "Task" (subset: appEngineHttpRequest se acepta
@@ -65,11 +81,91 @@ func New(db *storage.DB) *Service {
 	return &Service{db: db, httpClient: &http.Client{Timeout: 10 * time.Second}}
 }
 
-// dispatchTask performs the real HTTP call for a task's httpRequest and
-// records the attempt (dispatchCount/scheduleTime) back onto the stored
-// task. Runs in its own goroutine, scheduled to respect task.ScheduleTime
-// when it's in the future.
-func (s *Service) dispatchTask(t Task) {
+// defaultMaxAttempts/defaultMinBackoff/defaultMaxBackoff mirror the real
+// API's documented defaults for an unset retryConfig (maxAttempts: unlimited
+// in the real API; this emulator caps it at a finite default so a
+// permanently-failing endpoint doesn't retry forever in a background
+// goroutine with nothing watching it).
+const (
+	defaultMaxAttempts = 5
+	defaultMinBackoff  = 100 * time.Millisecond
+	defaultMaxBackoff  = 10 * time.Second
+)
+
+// resolveRetryConfig fills in defaults for any unset field of rc (rc may be
+// nil, meaning "use defaults for everything"). Unparseable duration strings
+// also fall back to their default, the same forgiving-of-malformed-input
+// posture the rest of this codebase takes for optional fields.
+func resolveRetryConfig(rc *RetryConfig) (maxAttempts int, minBackoff, maxBackoff time.Duration) {
+	maxAttempts, minBackoff, maxBackoff = defaultMaxAttempts, defaultMinBackoff, defaultMaxBackoff
+	if rc == nil {
+		return
+	}
+	if rc.MaxAttempts > 0 {
+		maxAttempts = rc.MaxAttempts
+	}
+	if rc.MinBackoff != "" {
+		if d, err := time.ParseDuration(rc.MinBackoff); err == nil && d > 0 {
+			minBackoff = d
+		}
+	}
+	if rc.MaxBackoff != "" {
+		if d, err := time.ParseDuration(rc.MaxBackoff); err == nil && d > 0 {
+			maxBackoff = d
+		}
+	}
+	return
+}
+
+// backoffFor returns the delay before retry attempt number `attempt`
+// (1-based: the delay before the 2nd attempt, 3rd attempt, etc.), doubling
+// each time and capped at maxBackoff -- the same exponential-with-cap shape
+// the real API documents for its default retry policy.
+func backoffFor(attempt int, minBackoff, maxBackoff time.Duration) time.Duration {
+	d := minBackoff
+	for i := 1; i < attempt; i++ {
+		d *= 2
+		if d >= maxBackoff {
+			return maxBackoff
+		}
+	}
+	return d
+}
+
+// dispatchOnce performs a single real HTTP call for a task's httpRequest
+// and reports whether it succeeded (status < 400, no transport error)
+// along with a human-readable status string for logging.
+func (s *Service) dispatchOnce(hr httpRequestSpec, method string, body []byte) (ok bool, status string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, hr.URL, bytes.NewReader(body))
+	if err != nil {
+		return false, err.Error()
+	}
+	for k, v := range hr.Headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return false, fmt.Sprintf("http %d", resp.StatusCode)
+	}
+	return true, "ok"
+}
+
+// dispatchTask performs the real HTTP call(s) for a task's httpRequest,
+// retrying with exponential backoff per the owning queue's retryConfig
+// (rc may be nil, meaning "use defaults") until it succeeds or exhausts
+// maxAttempts. Each attempt updates dispatchCount on the stored task; only
+// the final outcome (success, or exhausting retries) is recorded as a
+// terminal Cloud Logging entry, matching the real API's posture that
+// intermediate retries are an implementation detail, not separately
+// user-visible events. Runs in its own goroutine, scheduled to respect
+// task.ScheduleTime when it's in the future.
+func (s *Service) dispatchTask(t Task, rc *RetryConfig) {
 	if len(t.HTTPRequest) == 0 {
 		return
 	}
@@ -94,41 +190,38 @@ func (s *Service) dispatchTask(t Task) {
 	if hr.Body != "" {
 		body, _ = base64.StdEncoding.DecodeString(hr.Body)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, hr.URL, bytes.NewReader(body))
-	status, severity := "ok", "INFO"
-	if err == nil {
-		for k, v := range hr.Headers {
-			req.Header.Set(k, v)
-		}
-		if resp, derr := s.httpClient.Do(req); derr == nil {
-			resp.Body.Close()
-			if resp.StatusCode >= 400 {
-				status, severity = fmt.Sprintf("http %d", resp.StatusCode), "ERROR"
-			}
-		} else {
-			status, severity = derr.Error(), "ERROR"
-		}
-	} else {
-		status, severity = err.Error(), "ERROR"
-	}
 
-	var current Task
-	found, gerr := s.db.Get(bucketTasks, t.Name, &current)
-	if gerr == nil && found {
-		current.DispatchCount++
-		_ = s.db.Put(bucketTasks, t.Name, current)
-	}
-
+	maxAttempts, minBackoff, maxBackoff := resolveRetryConfig(rc)
 	project := activity.ProjectOf(t.Name)
+	var ok bool
+	var status string
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		ok, status = s.dispatchOnce(hr, method, body)
+
+		var current Task
+		found, gerr := s.db.Get(bucketTasks, t.Name, &current)
+		if gerr == nil && found {
+			current.DispatchCount++
+			_ = s.db.Put(bucketTasks, t.Name, current)
+		}
+		activity.IncrCounter(project, "cloudtasks.googleapis.com/queue/task_attempt_count", map[string]string{"task_name": t.Name})
+
+		if ok || attempt == maxAttempts {
+			break
+		}
+		time.Sleep(backoffFor(attempt, minBackoff, maxBackoff))
+	}
+
+	severity := "INFO"
+	if !ok {
+		severity = "ERROR"
+	}
 	activity.RecordLog(project, activity.LogEntry{
 		LogName:     fmt.Sprintf("projects/%s/logs/cloudtasks.googleapis.com%%2Ftask_operations_log", project),
 		Severity:    severity,
 		TextPayload: fmt.Sprintf("task %s dispatched %s %s: %s", t.Name, method, hr.URL, status),
 		Resource:    map[string]any{"type": "cloud_tasks_queue", "labels": map[string]string{"task_name": t.Name}},
 	})
-	activity.IncrCounter(project, "cloudtasks.googleapis.com/queue/task_attempt_count", map[string]string{"task_name": t.Name})
 }
 
 // Register monta las rutas de Cloud Tasks, siguiendo los paths reales de
@@ -161,7 +254,8 @@ func (s *Service) createQueue(w http.ResponseWriter, r *http.Request) {
 	location := r.PathValue("location")
 
 	var body struct {
-		Name string `json:"name"`
+		Name        string       `json:"name"`
+		RetryConfig *RetryConfig `json:"retryConfig"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
@@ -188,7 +282,7 @@ func (s *Service) createQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := Queue{Name: name, State: "RUNNING"}
+	q := Queue{Name: name, State: "RUNNING", RetryConfig: body.RetryConfig}
 	if err := s.db.Put(bucketQueues, q.Name, q); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
@@ -333,7 +427,7 @@ func (s *Service) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if q.State != "PAUSED" {
-		go s.dispatchTask(t)
+		go s.dispatchTask(t, q.RetryConfig)
 	}
 	server.WriteJSON(w, 200, t)
 }

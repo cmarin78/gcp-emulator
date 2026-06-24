@@ -256,6 +256,10 @@ func (s *Svc) Register(mux *http.ServeMux) {
 
 	// Fase 9: Cloud Run Jobs (recurso distinto de los servicios de arriba).
 	s.registerJobs(mux)
+
+	// Fase 16: Domain Mappings, vía la superficie domains.cloudrun.com/v1
+	// (ver domainmappings.go).
+	s.registerDomainMappings(mux)
 }
 
 func serviceName(project, location, service string) string {
