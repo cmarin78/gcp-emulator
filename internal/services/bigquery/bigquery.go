@@ -100,6 +100,9 @@ func (s *Svc) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /bigquery/v2/projects/{project}/datasets/{dataset}/tables/{table}", s.patchTable)
 	mux.HandleFunc("PUT /bigquery/v2/projects/{project}/datasets/{dataset}/tables/{table}", s.patchTable)
 	mux.HandleFunc("DELETE /bigquery/v2/projects/{project}/datasets/{dataset}/tables/{table}", s.deleteTable)
+
+	// Fase 17: data plane (insertAll, tabledata.list, jobs, queries).
+	s.registerDataPlane(mux)
 }
 
 func datasetKey(project, dataset string) string {

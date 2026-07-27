@@ -55,6 +55,9 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v3/projects/{project}", s.getProject)
 	mux.HandleFunc("DELETE /v3/projects/{project}", s.deleteProject)
 	mux.HandleFunc("GET /v3/operations/{operation}", s.getOperation)
+
+	// Fase 17: folders + folder IAM.
+	s.registerFolders(mux)
 }
 
 func projectName(projectID string) string {

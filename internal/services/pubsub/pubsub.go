@@ -31,10 +31,17 @@ const (
 	bucketSubscriptions = "pubsub.subscriptions"
 )
 
+// SchemaSettings replica pubsub#SchemaSettings (Fase 17).
+type SchemaSettings struct {
+	Schema   string `json:"schema"`             // resource name of the schema
+	Encoding string `json:"encoding,omitempty"` // JSON | BINARY
+}
+
 // Topic replica el recurso "Topic" de la API real.
 type Topic struct {
-	Name   string            `json:"name"` // projects/{project}/topics/{topic}
-	Labels map[string]string `json:"labels,omitempty"`
+	Name           string            `json:"name"` // projects/{project}/topics/{topic}
+	Labels         map[string]string `json:"labels,omitempty"`
+	SchemaSettings *SchemaSettings   `json:"schemaSettings,omitempty"`
 }
 
 // PushConfig replica pubsub#PushConfig (subset).
@@ -101,6 +108,9 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/projects/{project}/subscriptions/{subscription}", s.getSubscription)
 	mux.HandleFunc("DELETE /v1/projects/{project}/subscriptions/{subscription}", s.deleteSubscription)
 	mux.HandleFunc("POST /v1/projects/{project}/subscriptions/{subscriptionAction}", s.subscriptionAction)
+
+	// Fase 17: schema registry (ver schemas.go).
+	s.registerSchemas(mux)
 }
 
 func topicName(project, topic string) string {
@@ -114,9 +124,7 @@ func subscriptionName(project, sub string) string {
 func (s *Service) createTopic(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	topic := r.PathValue("topic")
-	var body struct {
-		Labels map[string]string `json:"labels"`
-	}
+	var body Topic
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	name := topicName(project, topic)
 	var existing Topic
@@ -129,7 +137,7 @@ func (s *Service) createTopic(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 409, "ALREADY_EXISTS", "topic ya existe: "+name)
 		return
 	}
-	t := Topic{Name: name, Labels: body.Labels}
+	t := Topic{Name: name, Labels: body.Labels, SchemaSettings: body.SchemaSettings}
 	if err := s.db.Put(bucketTopics, t.Name, t); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return

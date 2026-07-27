@@ -90,6 +90,9 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/projects/{project}/locations/{location}/builds", s.createBuildRegional)
 	mux.HandleFunc("GET /v1/projects/{project}/locations/{location}/builds", s.listBuildsRegional)
 	mux.HandleFunc("GET /v1/projects/{project}/locations/{location}/builds/{build}", s.getBuildRegional)
+
+	// Fase 17: triggers (ver triggers.go).
+	s.registerTriggers(mux)
 }
 
 func buildKey(project, id string) string {

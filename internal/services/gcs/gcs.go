@@ -47,16 +47,20 @@ type IAMBinding struct {
 }
 
 type Object struct {
-	Name        string `json:"name"`
-	Bucket      string `json:"bucket"`
-	ID          string `json:"id"`
-	ContentType string `json:"contentType,omitempty"`
-	Size        string `json:"size"`
-	TimeCreated string `json:"timeCreated"`
-	Updated     string `json:"updated"`
-	SelfLink    string `json:"selfLink"`
-	MediaLink   string `json:"mediaLink"`
-	ContentB64  string `json:"-"` // contenido real, no se serializa en metadata responses
+	Name             string            `json:"name"`
+	Bucket           string            `json:"bucket"`
+	ID               string            `json:"id"`
+	ContentType      string            `json:"contentType,omitempty"`
+	ContentLanguage  string            `json:"contentLanguage,omitempty"`
+	ContentEncoding  string            `json:"contentEncoding,omitempty"`
+	CacheControl     string            `json:"cacheControl,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
+	Size             string            `json:"size"`
+	TimeCreated      string            `json:"timeCreated"`
+	Updated          string            `json:"updated"`
+	SelfLink         string            `json:"selfLink"`
+	MediaLink        string            `json:"mediaLink"`
+	ContentB64       string            `json:"-"` // contenido real, no se serializa en metadata responses
 }
 
 type Service struct {
@@ -85,6 +89,10 @@ func (s *Service) Register(mux *http.ServeMux) {
 	// API real: GET/PUT /storage/v1/b/{bucket}/iam.
 	mux.HandleFunc("GET /storage/v1/b/{bucket}/iam", s.getBucketIamPolicy)
 	mux.HandleFunc("PUT /storage/v1/b/{bucket}/iam", s.setBucketIamPolicy)
+
+	// Fase 17: PATCH objeto (actualizar metadatos), compose.
+	mux.HandleFunc("PATCH /storage/v1/b/{bucket}/o/{object...}", s.patchObject)
+	mux.HandleFunc("POST /storage/v1/b/{bucket}/o/{destinationObject...}", s.composeObjects)
 }
 
 func (s *Service) createBucket(w http.ResponseWriter, r *http.Request) {
@@ -305,4 +313,120 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// ── Fase 17: PATCH object (metadata update) ───────────────────────────────────
+
+func (s *Service) patchObject(w http.ResponseWriter, r *http.Request) {
+	bucket := r.PathValue("bucket")
+	name := r.PathValue("object")
+
+	rec, found, err := s.loadObject(bucket, name)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "object not found")
+		return
+	}
+
+	var patch Object
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "invalid JSON: "+err.Error())
+		return
+	}
+
+	// Apply patchable fields only — name/bucket/size are immutable.
+	if patch.ContentType != "" {
+		rec.Object.ContentType = patch.ContentType
+	}
+	if patch.ContentLanguage != "" {
+		rec.Object.ContentLanguage = patch.ContentLanguage
+	}
+	if patch.ContentEncoding != "" {
+		rec.Object.ContentEncoding = patch.ContentEncoding
+	}
+	if patch.CacheControl != "" {
+		rec.Object.CacheControl = patch.CacheControl
+	}
+	if patch.Metadata != nil {
+		if rec.Object.Metadata == nil {
+			rec.Object.Metadata = map[string]string{}
+		}
+		for k, v := range patch.Metadata {
+			rec.Object.Metadata[k] = v
+		}
+	}
+	rec.Object.Updated = time.Now().UTC().Format(time.RFC3339)
+	rec.Object.ContentB64 = rec.ContentB64 // preserve stored content
+
+	if err := s.putObject(rec.Object); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	server.WriteJSON(w, 200, rec.Object)
+}
+
+// ── Fase 17: compose ──────────────────────────────────────────────────────────
+
+// composeObjects handles POST /storage/v1/b/{bucket}/o/{destination}/compose.
+// The {destinationObject...} wildcard captures e.g. "my-obj/compose"; we
+// strip the trailing "/compose" suffix to get the destination object name.
+func (s *Service) composeObjects(w http.ResponseWriter, r *http.Request) {
+	bucket := r.PathValue("bucket")
+	raw := r.PathValue("destinationObject")
+
+	// Only handle paths ending with /compose; everything else is unknown.
+	dst, hasCompose := strings.CutSuffix(raw, "/compose")
+	if !hasCompose {
+		server.WriteError(w, 404, "NOT_FOUND", "ruta no encontrada")
+		return
+	}
+
+	var body struct {
+		SourceObjects []struct {
+			Name string `json:"name"`
+		} `json:"sourceObjects"`
+		Destination Object `json:"destination"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "invalid JSON: "+err.Error())
+		return
+	}
+	if len(body.SourceObjects) == 0 {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "sourceObjects is required")
+		return
+	}
+
+	// Concatenate source objects' content.
+	var composed []byte
+	for _, src := range body.SourceObjects {
+		rec, found, _ := s.loadObject(bucket, src.Name)
+		if !found {
+			server.WriteError(w, 404, "NOT_FOUND", "source object not found: "+src.Name)
+			return
+		}
+		data, _ := base64.StdEncoding.DecodeString(rec.ContentB64)
+		composed = append(composed, data...)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	obj := Object{
+		Name:        dst,
+		Bucket:      bucket,
+		ID:          bucket + "/" + dst,
+		ContentType: orDefault(body.Destination.ContentType, "application/octet-stream"),
+		Size:        fmt.Sprintf("%d", len(composed)),
+		TimeCreated: now,
+		Updated:     now,
+		SelfLink:    "https://storage.googleapis.com/storage/v1/b/" + bucket + "/o/" + dst,
+		MediaLink:   "https://storage.googleapis.com/download/storage/v1/b/" + bucket + "/o/" + dst + "?alt=media",
+		ContentB64:  base64.StdEncoding.EncodeToString(composed),
+	}
+	if err := s.putObject(obj); err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	server.WriteJSON(w, 200, obj)
 }

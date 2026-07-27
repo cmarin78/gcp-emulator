@@ -265,6 +265,9 @@ func (s *Svc) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /sql/v1beta4/projects/{project}/instances/{instance}/users", s.deleteUser)
 
 	mux.HandleFunc("GET /sql/v1beta4/projects/{project}/operations/{operation}", s.getOperation)
+
+	// Fase 17: ssl certs + flags catalog.
+	s.registerExtras(mux)
 }
 
 func instanceKey(project, instance string) string {

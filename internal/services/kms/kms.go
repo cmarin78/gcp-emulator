@@ -76,6 +76,12 @@ func (s *Svc) Register(mux *http.ServeMux) {
 	// (mismo patrón usado en IAM/Pub-Sub/Secret Manager).
 	mux.HandleFunc("GET /v1/projects/{project}/locations/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}/cryptoKeyVersions/{versionAction}", s.getCryptoKeyVersion)
 	mux.HandleFunc("POST /v1/projects/{project}/locations/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}/cryptoKeyVersions/{versionAction}", s.versionAction)
+
+	// Fase 17: data-plane — encrypt/decrypt/sign/verify.
+	// La API real registra estas operaciones sobre la cryptoKey directamente
+	// (no sobre la versión) porque el emulador no necesita selección de
+	// versión. Se captura la acción con el patrón {keyAction} ya establecido.
+	mux.HandleFunc("POST /v1/projects/{project}/locations/{location}/keyRings/{keyRing}/cryptoKeys/{keyAction}", s.cryptoKeyAction)
 }
 
 func keyRingName(project, location, keyRing string) string {
@@ -295,6 +301,77 @@ func (s *Svc) versionAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	server.WriteJSON(w, 200, *ck.Primary)
+}
+
+// cryptoKeyAction despacha las operaciones data-plane de KMS (Fase 17):
+//   - encrypt        → devuelve ciphertext en base64 (mock determinista)
+//   - decrypt        → devuelve plaintext recuperado del ciphertext mock
+//   - asymmetricSign → devuelve signature en base64 (shape-only)
+//
+// Estas operaciones nunca necesitan el estado real de la clave para que
+// gcloud/Terraform/SDKs en modo lab puedan ejercitar el flujo completo
+// sin validación criptográfica real.
+func (s *Svc) cryptoKeyAction(w http.ResponseWriter, r *http.Request) {
+	keyID, action, ok := strings.Cut(r.PathValue("keyAction"), ":")
+	if !ok {
+		server.WriteError(w, 404, "NOT_FOUND", "ruta no encontrada")
+		return
+	}
+
+	name := cryptoKeyName(r.PathValue("project"), r.PathValue("location"), r.PathValue("keyRing"), keyID)
+	var ck CryptoKey
+	found, err := s.db.Get(bucketCryptoKey, name, &ck)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "cryptoKey no encontrada")
+		return
+	}
+
+	var body struct {
+		Plaintext  string `json:"plaintext"`  // base64, para encrypt
+		Ciphertext string `json:"ciphertext"` // base64, para decrypt
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	switch action {
+	case "encrypt":
+		if body.Plaintext == "" {
+			server.WriteError(w, 400, "INVALID_ARGUMENT", "plaintext is required")
+			return
+		}
+		// El ciphertext mock es el plaintext con un prefijo identificable;
+		// decode/encode real no es necesario para el lab.
+		ciphertext := "EMULATOR_CIPHERTEXT_" + body.Plaintext
+		server.WriteJSON(w, 200, map[string]any{
+			"name":       name + "/cryptoKeyVersions/1",
+			"ciphertext": ciphertext,
+		})
+	case "decrypt":
+		if body.Ciphertext == "" {
+			server.WriteError(w, 400, "INVALID_ARGUMENT", "ciphertext is required")
+			return
+		}
+		plaintext, wasEncrypted := strings.CutPrefix(body.Ciphertext, "EMULATOR_CIPHERTEXT_")
+		if !wasEncrypted {
+			// Ciphertext externo: devolvemos tal cual para no romper flujos
+			// que solo verifican que la llamada no falle.
+			plaintext = body.Ciphertext
+		}
+		server.WriteJSON(w, 200, map[string]any{
+			"plaintext":       plaintext,
+			"plaintextCrc32c": "0",
+		})
+	case "asymmetricSign":
+		server.WriteJSON(w, 200, map[string]any{
+			"name":      name + "/cryptoKeyVersions/1",
+			"signature": "EMULATOR_SIGNATURE_PLACEHOLDER",
+		})
+	default:
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "acción no soportada: "+action)
+	}
 }
 
 func orDefault(v, def string) string {

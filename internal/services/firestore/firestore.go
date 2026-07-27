@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -80,6 +81,9 @@ func (s *Svc) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/projects/{project}/databases/{database}/documents/{collection}/{docID}", s.getDocument)
 	mux.HandleFunc("PATCH /v1/projects/{project}/databases/{database}/documents/{collection}/{docID}", s.patchDocument)
 	mux.HandleFunc("DELETE /v1/projects/{project}/databases/{database}/documents/{collection}/{docID}", s.deleteDocument)
+
+	// Fase 17: runQuery + subcollections.
+	s.registerQueryAndSubcollections(mux)
 }
 
 func dbName(project, database string) string {
@@ -258,6 +262,11 @@ func (s *Svc) listDocuments(w http.ResponseWriter, r *http.Request) {
 	prefix := fmt.Sprintf("projects/%s/databases/%s/documents/%s/", project, database, collection)
 	items := []Document{}
 	_ = s.db.List(bucketDocuments, prefix, func(key string, raw []byte) error {
+		// Only return direct children — skip subcollection documents.
+		suffix := strings.TrimPrefix(key, prefix)
+		if strings.Contains(suffix, "/") {
+			return nil
+		}
 		var d Document
 		if err := json.Unmarshal(raw, &d); err != nil {
 			return err

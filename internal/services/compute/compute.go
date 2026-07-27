@@ -197,6 +197,9 @@ func (s *Service) Register(mux *http.ServeMux) {
 	// Fase 9: instance templates + managed instance groups/autoscalers.
 	s.registerInstanceTemplates(mux)
 	s.registerInstanceGroups(mux)
+
+	// Fase 17: static IP addresses (regional + global).
+	s.registerAddresses(mux)
 }
 
 func (s *Service) listZones(w http.ResponseWriter, r *http.Request) {

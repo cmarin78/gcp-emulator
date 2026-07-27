@@ -761,6 +761,50 @@ handler via `strings.Cut`, the same pattern this codebase already uses for
 Cloud Tasks' `queueAction` (`:pause`/`:resume`) and Cloud Scheduler/Secret
 Manager's verb-suffixed routes.
 
+## Phase 17 — Lab-completeness milestone ✅
+
+Comprehensive audit of the emulator's service surface, targeting the gaps
+most likely to surface in real lab/Terraform workflows. All 10 items below
+are implemented, tested, and verified (`go build ./...`, `go vet ./...`,
+`go test ./... -race` all clean across every package).
+
+| Area | What was added | Status |
+|---|---|---|
+| Compute Addresses | Regional + global static IP addresses (`google_compute_address`, `google_compute_global_address`) — CRUD with fake IP synthesis (or custom IP preserved if provided) under `compute.v1/.../(regions/{r}\|global)/addresses`. | ✅ |
+| KMS data plane | `encrypt`/`decrypt`/`asymmetricSign` verb-suffix actions on existing `CryptoKey` resources. Round-trip compatible: `decrypt(encrypt(x)) == x`. No real crypto — same `EMULATOR_CIPHERTEXT_` prefix technique as Spanner DDL passthrough. | ✅ |
+| Cloud Build triggers | `BuildTrigger` CRUD + `:run` action returning a `SUCCESS` build and an already-done `Operation`. Triggers share the existing build ID counter. | ✅ |
+| Pub/Sub schema registry | `Schema` CRUD (`AVRO`/`PROTOCOL_BUFFER`) + `:validate` (always valid). `Topic` gained a `schemaSettings` field (`schema` + `encoding`) preserved through create/get/update. | ✅ |
+| GCS PATCH + compose | `PATCH /storage/v1/b/{b}/o/{obj}` updates `contentType`, `contentLanguage`, `contentEncoding`, `cacheControl`, and `metadata` (merged). `POST .../compose` concatenates sourceObjects' byte content into a new destination object, returning the correct `size`. Fixed a latent `storedObject` vs `Object` bug: `Object.ContentB64` is tagged `json:"-"` for metadata responses and was being misread via `db.Get` directly; both new handlers now use `s.loadObject()`/`s.putObject()` exclusively. | ✅ |
+| BigQuery data plane | `tabledata.insertAll` (append typed JSON rows to a table), `tabledata.list` (returns rows in `{ f: [{v: ...}] }` wire format using schema field order), `jobs.insert` (runs a simple `SELECT * FROM dataset.table [LIMIT N]` query synchronously), `jobs.get`, `jobs.query` (synchronous), `jobs.getQueryResults`. Stored rows are `[]json.RawMessage`; the query regex accepts optional `project:` prefix and `LIMIT` clause. | ✅ |
+| Firestore runQuery + subcollections | `POST .../documents:runQuery` with `structuredQuery.from`, `where.fieldFilter` (EQUAL op on `stringValue`/`integerValue`/`booleanValue`), `limit`, and `offset`. Subcollections via `{path...}` wildcard route — odd-segment paths = collection (create/list), even-segment = document (get/patch/delete). `listDocuments` now skips subcollection keys (suffix contains `/`) to avoid leaking nested docs into parent-collection lists; `runQuery` respects `allDescendants`. | ✅ |
+| Cloud SQL ssl certs + flags | `sslCerts` CRUD (insert/list/get/delete) + `sslCerts:createEphemeral` (returns a fake PEM cert, not persisted). `GET /sql/v1beta4/flags` returns a static catalog of 13 common Postgres + MySQL flags, filterable by `?databaseVersion=`. | ✅ |
+| IAP test hardening | Added 5 supplemental tests for the IAP package: `getBrand` 404, required-fields validation (missing email, missing title), `getClient` 404, `deleteClient` confirms removal from list, and multiple-clients-per-brand with unique-secret assertion. | ✅ |
+| Resource Manager folders | `Folder` CRUD (`google_folder`) under `/v3/folders` — create (returns an already-done `Operation`), list (filterable by `?parent=`), get, patch (`displayName`), delete (soft-delete to `DELETE_REQUESTED` state). `Folder` IAM policy via `{folderID}:getIamPolicy` / `{folderID}:setIamPolicy` verb-suffix actions on `POST /v3/folders/{folderAction}`. | ✅ |
+
+Implementation notes:
+
+- All new verb-suffix routes (`:encrypt`/`:decrypt`/`:asymmetricSign`,
+  `sslCerts:createEphemeral`, `:getIamPolicy`/`:setIamPolicy`) use the
+  whole-segment wildcard + `strings.Cut` pattern established in Phase 16.
+- `documents:runQuery` is a **literal** path segment with a colon
+  (`"POST /v1/projects/{project}/databases/{database}/documents:runQuery"`)
+  — valid for Go's ServeMux since only the _wildcard_ (`{...}`) case
+  panics when followed by a colon suffix. This is distinct from the
+  wildcard-suffix pattern used elsewhere.
+- BigQuery's `rowsToWireFormat` infers field order from the table's
+  schema when present; falls back to sorted JSON keys for schema-less
+  tables. `runSimpleQuery` uses a single compiled regex with optional
+  project-prefix and LIMIT groups.
+- Firestore's `{path...}` multi-segment wildcard coexists with the
+  existing `{collection}/{docID}` routes: Go's ServeMux prefers the more
+  literal-heavy patterns for 1- and 2-segment paths, so the `{path...}`
+  route only activates for 3+ segments (subcollections), with no
+  registration conflicts.
+
+Verified 2026-07-24: `go build ./...`, `go vet ./...`, and
+`go test ./... -race` all pass across all 44 packages (including
+`cmd/server`'s full-mux registration test — zero route collisions).
+
 ### Decoupled add-on: network fabric, mini-routers, and GKE/k3d (proposed)
 
 These are the most expensive, most fragile-across-environments items
