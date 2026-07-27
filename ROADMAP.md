@@ -852,6 +852,40 @@ testcontainers/`docker run` directly as the recommended interim answer.
 The pre-existing "larger/niche surfaces" backlog below is unrelated to
 this real-execution work and remains separately prioritized.
 
+## Phase 18 — Dataflow + Vertex AI ✅
+
+Two independent additions picked up after the Phase 17 lab-completeness milestone, consuming the highest-value items from the backlog. Both follow the "shape-compatible, not behavior-complete" pattern established throughout this project.
+
+| Service | Minimum resources | Effort | Status |
+|---|---|---|---|
+| Cloud Dataflow | `jobs` CRUD (regional + legacy project-level paths) — `JOB_TYPE_BATCH` → `JOB_STATE_DONE` immediately; `JOB_TYPE_STREAMING` → `JOB_STATE_RUNNING` until cancelled via `PUT requestedState=JOB_STATE_CANCELLED` | M | ✅ |
+| Vertex AI | `models` (upload/get/list/patch/delete) + `endpoints` (create/get/list/patch/delete + `deployModel`/`undeployModel` verb-suffix actions) + operations poll endpoint | L (scoped) | ✅ |
+
+Implementation notes:
+
+- **Dataflow** routes are under `/v1b3/projects/{project}/locations/{location}/jobs` (current
+  API form) and `/v1b3/projects/{project}/jobs` (legacy, defaulting location to `us-central1`).
+  No Operation wrapper — the real Dataflow API returns `Job` directly from create/update,
+  unlike most other GCP services. Jobs are keyed by `{project}/{location}/{id}`, so regional
+  and legacy list are naturally isolated; the legacy list scans the full `{project}/` prefix
+  to span all locations.
+- **Vertex AI** routes are under `/aiplatform/v1/...` so Terraform's
+  `vertex_ai_custom_endpoint` should point at `<emulator>/aiplatform/`.
+  Models are created via `POST .../models:upload` (matching the real API's `UploadModelRequest`
+  shape — body is `{"model": {...}}`). Endpoints and models both return Operations
+  (done=true) from mutating calls. `deployModel`/`undeployModel` use the whole-segment
+  wildcard + `strings.Cut` pattern (`{endpointAction}` → split on `:`), same as
+  Cloud Scheduler's `:run` and Phase 17's folder IAM. A `GET .../operations/{op}` endpoint
+  is also registered so clients that poll the operation URL get a valid done=true response.
+- **Test fix noted**: `json.Unmarshal` does not zero out fields absent from the decoded JSON
+  when unmarshaling into a pre-populated struct. The `TestDeployAndUndeployModel` test uses
+  a fresh variable for the post-undeploy GET to avoid this stale-field trap (the field is
+  `omitempty` and is absent from the response JSON when the list is empty).
+
+Verified 2026-07-27: `go build ./...`, `go vet ./...`, and `go test ./... -race` all pass
+across all 46 packages (including `cmd/server`'s full-mux registration test — zero route
+collisions among the 2 new packages and the 44 pre-existing ones).
+
 ### Backlog (proposed, lower priority) — Larger/niche surfaces
 
 Each of these has a materially larger API surface and/or a narrower
@@ -862,8 +896,6 @@ stand in for beyond satisfying `terraform apply`).
 
 | Service | Minimum resources | Why | Effort |
 |---|---|---|---|
-| Vertex AI | `models`, `endpoints` (CRUD, no real inference) | Growing Terraform adoption, but a sprawling API (training, pipelines, feature store) — scoping to just models/endpoints keeps this tractable. | L |
 | App Engine | `applications`, `services`, `versions` (CRUD, no real deploy) | Long-tail demand; declining relative to Cloud Run, but `google_app_engine_application` still appears in legacy IaC. | L |
 | Dataproc | `clusters` (CRUD, shape-only — no real Spark/Hadoop) | Common in data-pipeline Terraform, but a cluster resource alone is a reasonable, bounded slice (vs. modeling jobs/workflows too). | L |
-| Dataflow | `jobs` (create/get/list, status always a fixed terminal state) | Pairs with Dataproc/BigQuery in data pipelines; simpler surface than Dataproc since jobs are mostly fire-and-forget from the API's perspective. | M |
 | Cloud Composer | `environments` (CRUD, shape-only — no real Airflow) | Highest effort-to-value ratio of this batch (environment creation alone is a large, slow-resolving real API); revisit only if there's specific demand. | L |
