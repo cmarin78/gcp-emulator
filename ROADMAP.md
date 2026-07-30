@@ -886,16 +886,50 @@ Verified 2026-07-27: `go build ./...`, `go vet ./...`, and `go test ./... -race`
 across all 46 packages (including `cmd/server`'s full-mux registration test — zero route
 collisions among the 2 new packages and the 44 pre-existing ones).
 
-### Backlog (proposed, lower priority) — Larger/niche surfaces
+## Phase 19 — Data platform completeness + legacy services ✅
 
-Each of these has a materially larger API surface and/or a narrower
-audience for a *local* emulator (these services' value is usually tied to
-real managed infrastructure — actual GPUs, actual Spark clusters, actual
-App Engine sandboxing — that a shape-only emulator can't meaningfully
-stand in for beyond satisfying `terraform apply`).
+Five new services consuming all remaining backlog items, plus two opportunistic additions (Cloud Bigtable and Cloud Memcache) that complete the NoSQL and caching stories alongside Firestore and Memorystore already implemented.
 
-| Service | Minimum resources | Why | Effort |
+| Service | Minimum resources | Effort | Status |
 |---|---|---|---|
-| App Engine | `applications`, `services`, `versions` (CRUD, no real deploy) | Long-tail demand; declining relative to Cloud Run, but `google_app_engine_application` still appears in legacy IaC. | L |
-| Dataproc | `clusters` (CRUD, shape-only — no real Spark/Hadoop) | Common in data-pipeline Terraform, but a cluster resource alone is a reasonable, bounded slice (vs. modeling jobs/workflows too). | L |
-| Cloud Composer | `environments` (CRUD, shape-only — no real Airflow) | Highest effort-to-value ratio of this batch (environment creation alone is a large, slow-resolving real API); revisit only if there's specific demand. | L |
+| Cloud Dataproc | `clusters` CRUD (regional) — operations return done=true, initial state RUNNING | L | ✅ |
+| Cloud Bigtable | `instances` CRUD + `clusters` sub-resource CRUD + `appProfiles` CRUD — CreateInstance returns Operation, initial state READY | L | ✅ |
+| Cloud Memcache | `instances` CRUD (per location) — CreateInstance returns Operation, initial state READY, default version MEMCACHE_1_6 | M | ✅ |
+| App Engine | `applications` (create/get/patch) + `services` (list/get/patch/delete, auto-created on first version deploy) + `versions` (CRUD + `:migrate` verb-suffix action) | L | ✅ |
+| Cloud Composer | `environments` CRUD (per location) — CreateEnvironment returns Operation, initial state RUNNING | L | ✅ |
+
+Implementation notes:
+
+- **Dataproc** routes under `/dataproc/v1/projects/{project}/regions/{region}/clusters`.
+  Key: `{project}/{region}/{clusterName}`. Body is the `Cluster` struct itself (not nested).
+  Same Operation pattern as Memorystore/Spanner.
+- **Cloud Bigtable** routes under `/bigtable/v2/projects/{project}/instances`. CreateInstance
+  accepts the `{"instanceId": ..., "instance": {...}, "clusters": {...}}` shape and
+  auto-creates any initial clusters. Clusters and appProfiles are separate sub-resources.
+  DeleteInstance/DeleteCluster return `{}` directly (no Operation), matching the real API.
+- **Cloud Memcache** routes under `/memcache/v1beta2/...` (v1beta2, matching the provider's
+  `memcache_custom_endpoint`). instanceId passed as query param, same as Memorystore.
+- **App Engine** routes under `/appengine/v1/apps`. The Go struct for the emulator service
+  is named `Emulator` (not `Service`) to avoid collision with the exported `Service` resource
+  type in the same package. `createVersion` auto-creates the parent service with a 100%
+  traffic split pointing at the new version. The `:migrate` action uses the whole-segment
+  wildcard + `strings.Cut` pattern (`{versionAction}` → split on `:`).
+- **Cloud Composer** routes under `/composer/v1/projects/{project}/locations/{location}/environments`.
+  Key: `{project}/{location}/{name}`. The name field is required in the body (Terraform passes
+  it as the short ID, not a full resource path).
+
+Verified 2026-07-30: `go build ./...`, `go vet ./...`, and `go test ./... -race` all pass
+across all 51 packages (47 with test files; 4 packages have no `_test.go` — normal for
+infrastructure-only packages). Zero route collisions among the 5 new packages and the
+46 pre-existing ones.
+
+### Backlog — cleared
+
+All originally planned services have now been implemented. The table below is retained for
+reference; all items are ✅.
+
+| Service | Minimum resources | Why | Effort | Status |
+|---|---|---|---|---|
+| App Engine | `applications`, `services`, `versions` (CRUD, no real deploy) | Long-tail demand; `google_app_engine_application` still appears in legacy IaC. | L | ✅ Phase 19 |
+| Dataproc | `clusters` (CRUD, shape-only — no real Spark/Hadoop) | Common in data-pipeline Terraform. | L | ✅ Phase 19 |
+| Cloud Composer | `environments` (CRUD, shape-only — no real Airflow) | Closes the orchestration story. | L | ✅ Phase 19 |
