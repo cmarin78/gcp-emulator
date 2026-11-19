@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -79,8 +80,7 @@ func instanceName(project, location, instance string) string {
 }
 
 func (s *Service) nextID() int64 {
-	s.seq++
-	return s.seq
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 func operationName(project, location string, id int64) string {

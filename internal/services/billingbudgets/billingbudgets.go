@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
@@ -85,8 +86,7 @@ func budgetName(account, budget string) string {
 }
 
 func (s *Service) nextID() int64 {
-	s.seq++
-	return s.seq
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 func (s *Service) createBudget(w http.ResponseWriter, r *http.Request) {

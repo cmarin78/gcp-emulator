@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -110,8 +111,7 @@ func regionalOperationName(project, location, id string) string {
 }
 
 func (s *Service) nextID() string {
-	s.seq++
-	return fmt.Sprintf("%d", s.seq)
+	return fmt.Sprintf("%d", atomic.AddInt64(&s.seq, 1))
 }
 
 type createBuildBody struct {

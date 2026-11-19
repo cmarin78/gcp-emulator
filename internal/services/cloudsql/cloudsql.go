@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/activity"
@@ -283,8 +284,7 @@ func userKey(project, instance, host, name string) string {
 }
 
 func (s *Svc) nextOpName() string {
-	s.seq++
-	return fmt.Sprintf("op-%d", s.seq)
+	return fmt.Sprintf("op-%d", atomic.AddInt64(&s.seq, 1))
 }
 
 func (s *Svc) writeOperation(w http.ResponseWriter, project, opType, targetID, targetLink string) {

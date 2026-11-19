@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -92,8 +93,7 @@ func jobKey(project, location, id string) string {
 }
 
 func (s *Service) nextID() string {
-	s.seq++
-	return fmt.Sprintf("job-%016d", s.seq)
+	return fmt.Sprintf("job-%016d", atomic.AddInt64(&s.seq, 1))
 }
 
 // initialState maps a job type to the state the emulator gives it on creation.

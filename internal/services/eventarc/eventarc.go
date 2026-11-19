@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -130,8 +131,7 @@ func triggerName(project, location, trigger string) string {
 }
 
 func (s *Service) nextID() int64 {
-	s.seq++
-	return s.seq
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 func (s *Service) writeOperation(w http.ResponseWriter, project, location, verb string, t Trigger) {

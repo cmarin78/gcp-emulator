@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -145,11 +146,11 @@ func (s *Service) createServiceAccount(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 409, "ALREADY_EXISTS", "service account ya existe: "+email)
 		return
 	}
-	s.seq++
+	seqID := atomic.AddInt64(&s.seq, 1)
 	sa := ServiceAccount{
 		Name:        fmt.Sprintf("projects/%s/serviceAccounts/%s@%s.iam.gserviceaccount.com", project, body.AccountID, project),
 		ProjectID:   project,
-		UniqueID:    fmt.Sprintf("%d%d", time.Now().Unix(), s.seq),
+		UniqueID:    fmt.Sprintf("%d%d", time.Now().Unix(), seqID),
 		Email:       email,
 		DisplayName: body.ServiceAccount.DisplayName,
 		Description: body.ServiceAccount.Description,
@@ -469,8 +470,8 @@ func (s *Service) createServiceAccountKey(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.seq++
-	keyID := fmt.Sprintf("%d%d", time.Now().Unix(), s.seq)
+	seqID := atomic.AddInt64(&s.seq, 1)
+	keyID := fmt.Sprintf("%d%d", time.Now().Unix(), seqID)
 	now := time.Now().UTC()
 	key := ServiceAccountKey{
 		Name:            saKeyName(project, email, keyID),

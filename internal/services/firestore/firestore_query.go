@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -297,8 +298,7 @@ func (s *Svc) subDocDispatch(w http.ResponseWriter, r *http.Request) {
 			// Create in this collection.
 			docID := r.URL.Query().Get("documentId")
 			if docID == "" {
-				s.seq++
-				docID = fmt.Sprintf("auto-%d", s.seq)
+				docID = fmt.Sprintf("auto-%d", atomic.AddInt64(&s.seq, 1))
 			}
 			var body struct {
 				Fields json.RawMessage `json:"fields"`

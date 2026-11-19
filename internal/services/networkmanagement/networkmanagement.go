@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -98,8 +99,7 @@ func testName(project, id string) string {
 }
 
 func (s *Service) nextSeq() int64 {
-	s.seq++
-	return s.seq
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 func (s *Service) createTest(w http.ResponseWriter, r *http.Request) {

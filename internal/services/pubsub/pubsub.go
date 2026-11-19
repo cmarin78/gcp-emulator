@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/activity"
@@ -241,11 +242,11 @@ func (s *Service) publish(w http.ResponseWriter, r *http.Request, project, topic
 	now := time.Now().UTC().Format(time.RFC3339)
 	ids := make([]string, 0, len(body.Messages))
 	for _, m := range body.Messages {
-		s.seq++
+		seq := atomic.AddInt64(&s.seq, 1)
 		msg := Message{
 			Data:        m.Data,
 			Attributes:  m.Attributes,
-			MessageID:   fmt.Sprintf("%d", s.seq),
+			MessageID:   fmt.Sprintf("%d", seq),
 			PublishTime: now,
 		}
 		ids = append(ids, msg.MessageID)
@@ -256,9 +257,9 @@ func (s *Service) publish(w http.ResponseWriter, r *http.Request, project, topic
 				go s.deliverPush(sub, msg)
 				continue
 			}
-			s.seq++
+			ackSeq := atomic.AddInt64(&s.seq, 1)
 			s.pending[sub.Name] = append(s.pending[sub.Name], ReceivedMessage{
-				AckID:   fmt.Sprintf("ack-%d", s.seq),
+				AckID:   fmt.Sprintf("ack-%d", ackSeq),
 				Message: msg,
 			})
 		}
@@ -269,39 +270,57 @@ func (s *Service) publish(w http.ResponseWriter, r *http.Request, project, topic
 // deliverPush hace un HTTP POST real al pushEndpoint de la subscription,
 // con el wire format estándar de Pub/Sub push:
 // {"message": {...}, "subscription": "projects/.../subscriptions/..."}.
+// Reintenta hasta 3 veces con backoff exponencial ante fallos de conexión o HTTP >= 400.
 func (s *Service) deliverPush(sub Subscription, msg Message) {
 	project := activity.ProjectOf(sub.Name)
 	payload, err := json.Marshal(map[string]any{
 		"message":      msg,
 		"subscription": sub.Name,
 	})
-	status, severity := "ok", "INFO"
 	if err != nil {
-		status, severity = err.Error(), "ERROR"
-	} else {
+		activity.RecordLog(project, activity.LogEntry{
+			LogName:     fmt.Sprintf("projects/%s/logs/pubsub.googleapis.com%%2Fdeliveries", project),
+			Severity:    "ERROR",
+			TextPayload: fmt.Sprintf("push delivery to %s for %s: %s", sub.PushConfig.PushEndpoint, sub.Name, err.Error()),
+			Resource:    map[string]any{"type": "pubsub_subscription", "labels": map[string]string{"subscription_id": sub.Name}},
+		})
+		return
+	}
+
+	maxAttempts := 3
+	backoff := 50 * time.Millisecond
+	var status, severity string
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
 		req, rerr := http.NewRequestWithContext(ctx, "POST", sub.PushConfig.PushEndpoint, bytes.NewReader(payload))
 		if rerr != nil {
 			status, severity = rerr.Error(), "ERROR"
+			cancel()
+			break
+		}
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range sub.PushConfig.Attributes {
+			req.Header.Set(k, v)
+		}
+		resp, derr := s.httpClient.Do(req)
+		cancel()
+		if derr == nil {
+			resp.Body.Close()
+			if resp.StatusCode < 400 {
+				status, severity = "ok", "INFO"
+				break
+			}
+			status, severity = fmt.Sprintf("http %d", resp.StatusCode), "ERROR"
 		} else {
-			req.Header.Set("Content-Type", "application/json")
-			for k, v := range sub.PushConfig.Attributes {
-				req.Header.Set(k, v)
-			}
-			if resp, derr := s.httpClient.Do(req); derr == nil {
-				resp.Body.Close()
-				if resp.StatusCode >= 400 {
-					status, severity = fmt.Sprintf("http %d", resp.StatusCode), "ERROR"
-				}
-			} else {
-				status, severity = derr.Error(), "ERROR"
-			}
+			status, severity = derr.Error(), "ERROR"
+		}
+
+		if attempt < maxAttempts {
+			time.Sleep(backoff)
+			backoff *= 2
 		}
 	}
-	// Sin reintentos ni dead-lettering: si el endpoint falla, el mensaje se
-	// pierde (a diferencia de la API real). Documentado como límite en el
-	// ROADMAP — agregar retry/backoff queda para una próxima iteración.
 
 	activity.RecordLog(project, activity.LogEntry{
 		LogName:     fmt.Sprintf("projects/%s/logs/pubsub.googleapis.com%%2Fdeliveries", project),

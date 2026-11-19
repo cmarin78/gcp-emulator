@@ -21,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/activity"
@@ -431,16 +432,16 @@ func (s *Svc) deleteFunction(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	s.seq++
-	op := Operation{Name: operationName(project, location, fmt.Sprintf("op-%d", s.seq)), Done: true}
+	opID := atomic.AddInt64(&s.seq, 1)
+	op := Operation{Name: operationName(project, location, fmt.Sprintf("op-%d", opID)), Done: true}
 	server.WriteJSON(w, 200, op)
 }
 
 func (s *Svc) writeOperation(w http.ResponseWriter, project, location string, fn Function) {
 	respBytes, _ := json.Marshal(fn)
-	s.seq++
+	opID := atomic.AddInt64(&s.seq, 1)
 	op := Operation{
-		Name:     operationName(project, location, fmt.Sprintf("op-%d", s.seq)),
+		Name:     operationName(project, location, fmt.Sprintf("op-%d", opID)),
 		Done:     true,
 		Response: respBytes,
 	}

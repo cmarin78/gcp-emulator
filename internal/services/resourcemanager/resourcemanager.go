@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -111,9 +112,9 @@ func (s *Service) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respBytes, _ := json.Marshal(proj)
-	s.seq++
+	opID := atomic.AddInt64(&s.seq, 1)
 	op := Operation{
-		Name:     operationName(fmt.Sprintf("op-%d", s.seq)),
+		Name:     operationName(fmt.Sprintf("op-%d", opID)),
 		Done:     true,
 		Response: respBytes,
 	}
@@ -171,9 +172,9 @@ func (s *Service) deleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respBytes, _ := json.Marshal(proj)
-	s.seq++
+	opID := atomic.AddInt64(&s.seq, 1)
 	op := Operation{
-		Name:     operationName(fmt.Sprintf("op-%d", s.seq)),
+		Name:     operationName(fmt.Sprintf("op-%d", opID)),
 		Done:     true,
 		Response: respBytes,
 	}

@@ -245,3 +245,42 @@ func TestAppProfileRequiresID(t *testing.T) {
 		t.Fatalf("no appProfileId: want 400, got %d", status)
 	}
 }
+
+func TestDeleteInstanceCascadesChildren(t *testing.T) {
+	srv := newTestServer(t)
+	b := instanceBase(srv.URL)
+	testutil.DoJSON(t, "POST", b, map[string]any{
+		"instanceId": "cascade-inst",
+		"instance":   map[string]any{"displayName": "Cascade Test"},
+		"clusters": map[string]any{
+			"c1": map[string]any{"location": "us-central1-b", "serveNodes": 1},
+		},
+	}, nil)
+
+	testutil.DoJSON(t, "POST", b+"/cascade-inst/appProfiles?appProfileId=p1", map[string]any{
+		"description": "profile 1",
+	}, nil)
+
+	// Verify child cluster and profile exist
+	var c Cluster
+	if status := testutil.DoJSON(t, "GET", b+"/cascade-inst/clusters/c1", nil, &c); status != 200 {
+		t.Fatalf("cluster get: want 200, got %d", status)
+	}
+	var p AppProfile
+	if status := testutil.DoJSON(t, "GET", b+"/cascade-inst/appProfiles/p1", nil, &p); status != 200 {
+		t.Fatalf("profile get: want 200, got %d", status)
+	}
+
+	// Delete instance
+	if status := testutil.DoJSON(t, "DELETE", b+"/cascade-inst", nil, nil); status != 200 {
+		t.Fatalf("delete instance: want 200, got %d", status)
+	}
+
+	// Verify children are deleted
+	if status := testutil.DoJSON(t, "GET", b+"/cascade-inst/clusters/c1", nil, nil); status != 404 {
+		t.Errorf("cluster after parent delete: want 404, got %d", status)
+	}
+	if status := testutil.DoJSON(t, "GET", b+"/cascade-inst/appProfiles/p1", nil, nil); status != 404 {
+		t.Errorf("profile after parent delete: want 404, got %d", status)
+	}
+}

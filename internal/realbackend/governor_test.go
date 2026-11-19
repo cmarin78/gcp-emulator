@@ -187,3 +187,28 @@ func TestSnapshotBackendsNeverNil(t *testing.T) {
 		t.Fatal("expected Backends to be an empty slice, not nil, so it serializes as []")
 	}
 }
+
+func TestGovernorStopAll(t *testing.T) {
+	g := NewGovernor(1000)
+	b1 := &fakeBackend{kind: "b1", footprint: 100}
+	b2 := &fakeBackend{kind: "b2", footprint: 200}
+
+	var evicted []string
+	g.SetOnEvict(func(id string) { evicted = append(evicted, id) })
+
+	g.Admit("one", b1)
+	g.Admit("two", b2)
+
+	g.StopAll()
+
+	if !b1.stopped || !b2.stopped {
+		t.Errorf("StopAll should stop all backends: b1=%v b2=%v", b1.stopped, b2.stopped)
+	}
+	if len(evicted) != 2 {
+		t.Errorf("expected 2 eviction notifications, got %v", evicted)
+	}
+	snap := g.Snapshot()
+	if snap.UsedMB != 0 || len(snap.Backends) != 0 {
+		t.Errorf("expected governor to be empty after StopAll, got %+v", snap)
+	}
+}

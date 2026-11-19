@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -128,12 +129,12 @@ func (s *Service) createZone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.seq++
+	seqID := atomic.AddInt64(&s.seq, 1)
 	zone := ManagedZone{
 		Name:         body.Name,
 		DNSName:      body.DNSName,
 		Description:  body.Description,
-		Id:           fmt.Sprintf("%d", s.seq),
+		Id:           fmt.Sprintf("%d", seqID),
 		CreationTime: time.Now().UTC().Format(time.RFC3339),
 		NameServers: []string{
 			fmt.Sprintf("ns-emulator-1.%s", body.DNSName),
@@ -248,9 +249,9 @@ func (s *Service) createChange(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.seq++
+	seqID := atomic.AddInt64(&s.seq, 1)
 	change := Change{
-		Id:        fmt.Sprintf("%d", s.seq),
+		Id:        fmt.Sprintf("%d", seqID),
 		Status:    "done",
 		StartTime: time.Now().UTC().Format(time.RFC3339),
 		Additions: body.Additions,

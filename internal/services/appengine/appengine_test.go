@@ -241,3 +241,32 @@ func TestMigrateVersion(t *testing.T) {
 		t.Fatalf("migrate: split=%+v", svc.Split)
 	}
 }
+
+func TestDeleteServiceCascadesVersions(t *testing.T) {
+	srv := newTestServer(t)
+	b := srv.URL + "/appengine/v1/apps/app1/services/svc1"
+
+	testutil.DoJSON(t, "POST", b+"/versions", map[string]any{"id": "v1", "runtime": "go122"}, nil)
+	testutil.DoJSON(t, "POST", b+"/versions", map[string]any{"id": "v2", "runtime": "go122"}, nil)
+
+	var v1, v2 Version
+	if status := testutil.DoJSON(t, "GET", b+"/versions/v1", nil, &v1); status != 200 {
+		t.Fatalf("get v1: want 200, got %d", status)
+	}
+	if status := testutil.DoJSON(t, "GET", b+"/versions/v2", nil, &v2); status != 200 {
+		t.Fatalf("get v2: want 200, got %d", status)
+	}
+
+	// Delete service
+	if status := testutil.DoJSON(t, "DELETE", b, nil, nil); status != 200 {
+		t.Fatalf("delete service: want 200, got %d", status)
+	}
+
+	// Verify versions are cascade deleted
+	if status := testutil.DoJSON(t, "GET", b+"/versions/v1", nil, nil); status != 404 {
+		t.Errorf("v1 after service delete: want 404, got %d", status)
+	}
+	if status := testutil.DoJSON(t, "GET", b+"/versions/v2", nil, nil); status != 404 {
+		t.Errorf("v2 after service delete: want 404, got %d", status)
+	}
+}

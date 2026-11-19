@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -77,8 +78,7 @@ func (s *Service) createFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.seq++
-	folderID := fmt.Sprintf("%d", s.seq)
+	folderID := fmt.Sprintf("%d", atomic.AddInt64(&s.seq, 1))
 	now := time.Now().UTC().Format(time.RFC3339)
 	folder := Folder{
 		Name:        "folders/" + folderID,
@@ -95,9 +95,9 @@ func (s *Service) createFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respBytes, _ := json.Marshal(folder)
-	s.seq++
+	opID := atomic.AddInt64(&s.seq, 1)
 	op := Operation{
-		Name:     operationName(fmt.Sprintf("op-%d", s.seq)),
+		Name:     operationName(fmt.Sprintf("op-%d", opID)),
 		Done:     true,
 		Response: respBytes,
 	}
@@ -187,9 +187,9 @@ func (s *Service) deleteFolder(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.Put(bucketFolders, name, existing)
 
 	respBytes, _ := json.Marshal(existing)
-	s.seq++
+	opID := atomic.AddInt64(&s.seq, 1)
 	op := Operation{
-		Name:     operationName(fmt.Sprintf("op-%d", s.seq)),
+		Name:     operationName(fmt.Sprintf("op-%d", opID)),
 		Done:     true,
 		Response: respBytes,
 	}

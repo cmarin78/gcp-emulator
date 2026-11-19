@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/realbackend"
@@ -219,8 +220,8 @@ func (s *Svc) deleteJob(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	s.seq++
-	op := Operation{Name: operationName(project, location, fmt.Sprintf("op-%d", s.seq)), Done: true}
+	opID := atomic.AddInt64(&s.seq, 1)
+	op := Operation{Name: operationName(project, location, fmt.Sprintf("op-%d", opID)), Done: true}
 	server.WriteJSON(w, 200, op)
 }
 
@@ -252,14 +253,14 @@ func (s *Svc) jobAction(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	s.seq++
+	opID := atomic.AddInt64(&s.seq, 1)
 
 	resp := map[string]any{"name": execName}
 	if realRun := s.tryRunReal(r, &job); realRun != nil {
 		resp["realRun"] = realRun
 	}
 	respBytes, _ := json.Marshal(resp)
-	op := Operation{Name: operationName(project, location, fmt.Sprintf("op-%d", s.seq)), Done: true, Response: respBytes}
+	op := Operation{Name: operationName(project, location, fmt.Sprintf("op-%d", opID)), Done: true, Response: respBytes}
 	server.WriteJSON(w, 200, op)
 }
 
@@ -316,9 +317,9 @@ func jobRunTimeout(timeout string) time.Duration {
 
 func (s *Svc) writeJobOperation(w http.ResponseWriter, project, location string, job Job) {
 	respBytes, _ := json.Marshal(job)
-	s.seq++
+	opID := atomic.AddInt64(&s.seq, 1)
 	op := Operation{
-		Name:     operationName(project, location, fmt.Sprintf("op-%d", s.seq)),
+		Name:     operationName(project, location, fmt.Sprintf("op-%d", opID)),
 		Done:     true,
 		Response: respBytes,
 	}

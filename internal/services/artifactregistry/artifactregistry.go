@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -114,9 +115,9 @@ func (s *Service) createRepository(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respBytes, _ := json.Marshal(repo)
-	s.seq++
+	opID := atomic.AddInt64(&s.seq, 1)
 	op := Operation{
-		Name:     operationName(project, location, fmt.Sprintf("op-%d", s.seq)),
+		Name:     operationName(project, location, fmt.Sprintf("op-%d", opID)),
 		Done:     true,
 		Response: respBytes,
 	}
@@ -162,9 +163,9 @@ func (s *Service) deleteRepository(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	s.seq++
+	opID := atomic.AddInt64(&s.seq, 1)
 	op := Operation{
-		Name: operationName(project, location, fmt.Sprintf("op-%d", s.seq)),
+		Name: operationName(project, location, fmt.Sprintf("op-%d", opID)),
 		Done: true,
 	}
 	server.WriteJSON(w, 200, op)

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/storage"
@@ -66,8 +67,7 @@ func connectorName(project, location, connector string) string {
 }
 
 func (s *Service) nextID() int64 {
-	s.seq++
-	return s.seq
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 func operationName(project, location string, id int64) string {

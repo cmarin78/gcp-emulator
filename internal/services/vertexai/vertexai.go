@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -120,8 +121,7 @@ func endpointKey(project, location, id string) string {
 }
 
 func (s *Service) nextID() string {
-	s.seq++
-	return fmt.Sprintf("%d", s.seq)
+	return fmt.Sprintf("%d", atomic.AddInt64(&s.seq, 1))
 }
 
 func operationName(project, location, id string) string {

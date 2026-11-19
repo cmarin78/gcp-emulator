@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -289,7 +290,7 @@ func (s *Service) insertInstance(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 409, "ALREADY_EXISTS", "instancia ya existe: "+body.Name)
 		return
 	}
-	s.seq++
+	seqID := atomic.AddInt64(&s.seq, 1)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	disks, err := s.resolveAttachedDisks(project, zone, body.Name, body.Disks)
@@ -304,14 +305,14 @@ func (s *Service) insertInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	meta := Metadata{Kind: "compute#metadata", Fingerprint: fakeFingerprint(fmt.Sprintf("meta-%d", s.seq))}
+	meta := Metadata{Kind: "compute#metadata", Fingerprint: fakeFingerprint(fmt.Sprintf("meta-%d", seqID))}
 	if body.Metadata != nil {
 		meta.Items = body.Metadata.Items
 	}
 	autoRestart := true
 
 	inst := Instance{
-		ID:                fmt.Sprintf("%d", s.seq),
+		ID:                fmt.Sprintf("%d", seqID),
 		Name:              body.Name,
 		Zone:              zone,
 		MachineType:       orDefault(body.MachineType, "e2-medium"),
@@ -322,7 +323,7 @@ func (s *Service) insertInstance(w http.ResponseWriter, r *http.Request) {
 		Disks:             disks,
 		NetworkInterfaces: ifaces,
 		Metadata:          meta,
-		Tags:              Tags{Fingerprint: fakeFingerprint(fmt.Sprintf("tags-%d", s.seq))},
+		Tags:              Tags{Fingerprint: fakeFingerprint(fmt.Sprintf("tags-%d", seqID))},
 		Scheduling:        Scheduling{OnHostMaintenance: "MIGRATE", AutomaticRestart: &autoRestart},
 		CPUPlatform:       "Intel Broadwell",
 		LabelFingerprint:  fakeFingerprint(fmt.Sprintf("labels-%d", s.seq)),
@@ -422,8 +423,7 @@ func (s *Service) resolveNetworkInterfaces(project string, in []NetworkIface) []
 }
 
 func (s *Service) nextSeq() int64 {
-	s.seq++
-	return s.seq
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 func (s *Service) nextIP() int64 {

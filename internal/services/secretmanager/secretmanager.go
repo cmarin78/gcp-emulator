@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -192,8 +193,7 @@ func (s *Service) addVersion(w http.ResponseWriter, r *http.Request, project, se
 		return
 	}
 
-	s.seq++
-	verNum := s.seq
+	verNum := atomic.AddInt64(&s.seq, 1)
 	rec := secretVersionRecord{
 		SecretVersion: SecretVersion{
 			Name:       versionName(project, secretID, fmt.Sprintf("%d", verNum)),

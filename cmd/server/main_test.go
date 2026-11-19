@@ -16,8 +16,11 @@ import (
 	"testing"
 
 	"github.com/cesar/gcp-emulator/internal/server"
+	"github.com/cesar/gcp-emulator/internal/services/appengine"
 	"github.com/cesar/gcp-emulator/internal/services/artifactregistry"
+	"github.com/cesar/gcp-emulator/internal/services/assetinventory"
 	"github.com/cesar/gcp-emulator/internal/services/bigquery"
+	"github.com/cesar/gcp-emulator/internal/services/bigtable"
 	"github.com/cesar/gcp-emulator/internal/services/billingbudgets"
 	"github.com/cesar/gcp-emulator/internal/services/certificatemanager"
 	"github.com/cesar/gcp-emulator/internal/services/cloudbuild"
@@ -27,7 +30,10 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/cloudscheduler"
 	"github.com/cesar/gcp-emulator/internal/services/cloudsql"
 	"github.com/cesar/gcp-emulator/internal/services/cloudtasks"
+	"github.com/cesar/gcp-emulator/internal/services/composer"
 	"github.com/cesar/gcp-emulator/internal/services/compute"
+	"github.com/cesar/gcp-emulator/internal/services/dataflow"
+	"github.com/cesar/gcp-emulator/internal/services/dataproc"
 	"github.com/cesar/gcp-emulator/internal/services/eventarc"
 	"github.com/cesar/gcp-emulator/internal/services/filestore"
 	"github.com/cesar/gcp-emulator/internal/services/firestore"
@@ -38,14 +44,17 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/kms"
 	"github.com/cesar/gcp-emulator/internal/services/loadbalancing"
 	"github.com/cesar/gcp-emulator/internal/services/logging"
+	"github.com/cesar/gcp-emulator/internal/services/memcache"
 	"github.com/cesar/gcp-emulator/internal/services/memorystore"
 	"github.com/cesar/gcp-emulator/internal/services/monitoring"
+	"github.com/cesar/gcp-emulator/internal/services/networkmanagement"
 	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
 	"github.com/cesar/gcp-emulator/internal/services/pubsub"
 	"github.com/cesar/gcp-emulator/internal/services/resourcemanager"
 	"github.com/cesar/gcp-emulator/internal/services/secretmanager"
 	"github.com/cesar/gcp-emulator/internal/services/servicenetworking"
 	"github.com/cesar/gcp-emulator/internal/services/spanner"
+	"github.com/cesar/gcp-emulator/internal/services/vertexai"
 	"github.com/cesar/gcp-emulator/internal/services/vpcaccess"
 	"github.com/cesar/gcp-emulator/internal/services/workflows"
 	"github.com/cesar/gcp-emulator/internal/testutil"
@@ -97,6 +106,15 @@ func TestAllServicesRegisterWithoutPanic(t *testing.T) {
 	orgpolicy.New(db).Register(mux)
 	billingbudgets.New(db).Register(mux)
 	certificatemanager.New(db).Register(mux)
+	networkmanagement.New(db).Register(mux)
+	assetinventory.New(db).Register(mux)
+	dataflow.New(db).Register(mux)
+	vertexai.New(db).Register(mux)
+	dataproc.New(db).Register(mux)
+	bigtable.New(db).Register(mux)
+	memcache.New(db).Register(mux)
+	appengine.New(db).Register(mux)
+	composer.New(db).Register(mux)
 
 	// A trivial sanity request: the mux should at least be wired up enough
 	// to return *some* response (even a 404) instead of nil-dereferencing.

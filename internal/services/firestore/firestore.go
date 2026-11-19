@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -95,8 +96,7 @@ func docName(project, database, collection, docID string) string {
 }
 
 func (s *Svc) nextOpName() string {
-	s.seq++
-	return fmt.Sprintf("op-%d", s.seq)
+	return fmt.Sprintf("op-%d", atomic.AddInt64(&s.seq, 1))
 }
 
 func (s *Svc) createDatabase(w http.ResponseWriter, r *http.Request) {
@@ -230,8 +230,7 @@ func (s *Svc) createDocument(w http.ResponseWriter, r *http.Request) {
 	collection := r.PathValue("collection")
 	docID := r.URL.Query().Get("documentId")
 	if docID == "" {
-		s.seq++
-		docID = fmt.Sprintf("auto-%d", s.seq)
+		docID = fmt.Sprintf("auto-%d", atomic.AddInt64(&s.seq, 1))
 	}
 	var body struct {
 		Fields json.RawMessage `json:"fields"`

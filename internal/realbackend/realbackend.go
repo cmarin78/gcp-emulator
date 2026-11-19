@@ -195,6 +195,31 @@ func (g *Governor) Release(id string) {
 	}
 }
 
+// StopAll stops all currently admitted backends and clears the governor.
+// Call this during graceful server shutdown to avoid orphaned processes or containers.
+func (g *Governor) StopAll() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	var stoppedBackends []Backend
+	var evictedIDs []string
+	for id, m := range g.backends {
+		delete(g.backends, id)
+		evictedIDs = append(evictedIDs, id)
+		if m != nil && m.backend != nil {
+			stoppedBackends = append(stoppedBackends, m.backend)
+		}
+	}
+	fn := g.onEvict
+	g.mu.Unlock()
+
+	notifyEvicted(fn, evictedIDs)
+	for _, b := range stoppedBackends {
+		_ = b.Stop()
+	}
+}
+
 // Touch resets id's idle clock. Concrete backends (Phase 13+) should call
 // this on every active use so an actively-used backend is never picked as
 // the LRU eviction victim ahead of one that's merely older but inactive.

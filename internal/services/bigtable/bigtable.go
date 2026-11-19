@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -88,8 +89,7 @@ func (s *Service) Register(mux *http.ServeMux) {
 }
 
 func (s *Service) nextSeq() int64 {
-	s.seq++
-	return s.seq
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 func opName(project string, id int64) string {
@@ -248,6 +248,27 @@ func (s *Service) deleteInstance(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+
+	// Cascade delete child clusters and app profiles
+	clusterPrefix := fmt.Sprintf("%s/%s/", project, id)
+	var clusterKeys []string
+	_ = s.db.List(bucketClusters, clusterPrefix, func(key string, _ []byte) error {
+		clusterKeys = append(clusterKeys, key)
+		return nil
+	})
+	for _, k := range clusterKeys {
+		_ = s.db.Delete(bucketClusters, k)
+	}
+
+	var profileKeys []string
+	_ = s.db.List(bucketAppProfiles, clusterPrefix, func(key string, _ []byte) error {
+		profileKeys = append(profileKeys, key)
+		return nil
+	})
+	for _, k := range profileKeys {
+		_ = s.db.Delete(bucketAppProfiles, k)
+	}
+
 	server.WriteJSON(w, 200, map[string]any{})
 }
 

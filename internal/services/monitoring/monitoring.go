@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/activity"
@@ -59,8 +60,7 @@ func (s *Svc) Register(mux *http.ServeMux) {
 }
 
 func (s *Svc) nextID() string {
-	s.seq++
-	return fmt.Sprintf("%d", s.seq)
+	return fmt.Sprintf("%d", atomic.AddInt64(&s.seq, 1))
 }
 
 func policyKey(project, policy string) string {

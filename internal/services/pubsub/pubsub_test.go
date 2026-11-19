@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -167,6 +168,44 @@ func TestPushSubscriptionDeliversRealHTTP(t *testing.T) {
 			t.Fatal("timed out waiting for recorded push_request_count series")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPushSubscriptionRetriesOnFailure(t *testing.T) {
+	var attempts int64
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		att := atomic.AddInt64(&attempts, 1)
+		if att < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(endpoint.Close)
+
+	srv := newTestServer(t)
+	testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/retry-proj/topics/retry-topic", nil, nil)
+	testutil.DoJSON(t, "PUT", srv.URL+"/v1/projects/retry-proj/subscriptions/retry-sub", map[string]any{
+		"topic": "projects/retry-proj/topics/retry-topic",
+		"pushConfig": map[string]any{
+			"pushEndpoint": endpoint.URL,
+		},
+	}, nil)
+
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/retry-proj/topics/retry-topic:publish", map[string]any{
+		"messages": []map[string]string{{"data": "cmV0cnk="}},
+	}, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		att := atomic.LoadInt64(&attempts)
+		if att >= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected 3 retry attempts, got %d", att)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

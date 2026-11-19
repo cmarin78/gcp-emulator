@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/activity"
@@ -400,8 +401,7 @@ func (s *Service) createTask(w http.ResponseWriter, r *http.Request) {
 		taskID = taskID[idx+1:]
 	}
 	if taskID == "" {
-		s.seq++
-		taskID = fmt.Sprintf("task-%d", s.seq)
+		taskID = fmt.Sprintf("task-%d", atomic.AddInt64(&s.seq, 1))
 	} else {
 		var existing Task
 		found, err := s.db.Get(bucketTasks, taskName(project, location, queueID, taskID), &existing)

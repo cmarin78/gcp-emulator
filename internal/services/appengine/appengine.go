@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -106,8 +107,7 @@ func (s *Emulator) Register(mux *http.ServeMux) {
 }
 
 func (s *Emulator) nextSeq() int64 {
-	s.seq++
-	return s.seq
+	return atomic.AddInt64(&s.seq, 1)
 }
 
 func opName(app string, id int64) string {
@@ -284,6 +284,18 @@ func (s *Emulator) deleteService(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+
+	// Cascade delete child versions
+	verPrefix := fmt.Sprintf("%s/%s/", app, svcID)
+	var verKeys []string
+	_ = s.db.List(bucketVersions, verPrefix, func(key string, _ []byte) error {
+		verKeys = append(verKeys, key)
+		return nil
+	})
+	for _, k := range verKeys {
+		_ = s.db.Delete(bucketVersions, k)
+	}
+
 	s.writeOperation(w, app, map[string]any{})
 }
 
