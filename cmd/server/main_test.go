@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/cesar/gcp-emulator/internal/server"
+	"github.com/cesar/gcp-emulator/internal/services/alloydb"
 	"github.com/cesar/gcp-emulator/internal/services/appengine"
 	"github.com/cesar/gcp-emulator/internal/services/artifactregistry"
 	"github.com/cesar/gcp-emulator/internal/services/assetinventory"
@@ -24,6 +25,7 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/billingbudgets"
 	"github.com/cesar/gcp-emulator/internal/services/certificatemanager"
 	"github.com/cesar/gcp-emulator/internal/services/cloudbuild"
+	"github.com/cesar/gcp-emulator/internal/services/clouddeploy"
 	"github.com/cesar/gcp-emulator/internal/services/clouddns"
 	"github.com/cesar/gcp-emulator/internal/services/cloudfunctions"
 	"github.com/cesar/gcp-emulator/internal/services/cloudrun"
@@ -50,6 +52,7 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/monitoring"
 	"github.com/cesar/gcp-emulator/internal/services/networkmanagement"
 	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
+	"github.com/cesar/gcp-emulator/internal/services/privateca"
 	"github.com/cesar/gcp-emulator/internal/services/pubsub"
 	"github.com/cesar/gcp-emulator/internal/services/resourcemanager"
 	"github.com/cesar/gcp-emulator/internal/services/secretmanager"
@@ -119,6 +122,9 @@ func TestAllServicesRegisterWithoutPanic(t *testing.T) {
 	composer.New(db).Register(mux)
 	serviceusage.New(db).Register(mux)
 	metadata.New(db).Register(mux)
+	alloydb.New(db).Register(mux)
+	privateca.New(db).Register(mux)
+	clouddeploy.New(db).Register(mux)
 
 	// A trivial sanity request: the mux should at least be wired up enough
 	// to return *some* response (even a 404) instead of nil-dereferencing.

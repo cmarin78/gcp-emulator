@@ -18,6 +18,7 @@ import (
 	"github.com/cesar/gcp-emulator/internal/iamenforce"
 	"github.com/cesar/gcp-emulator/internal/realbackend"
 	"github.com/cesar/gcp-emulator/internal/server"
+	"github.com/cesar/gcp-emulator/internal/services/alloydb"
 	"github.com/cesar/gcp-emulator/internal/services/artifactregistry"
 	"github.com/cesar/gcp-emulator/internal/services/assetinventory"
 	"github.com/cesar/gcp-emulator/internal/services/bigquery"
@@ -30,6 +31,7 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/dataproc"
 	"github.com/cesar/gcp-emulator/internal/services/certificatemanager"
 	"github.com/cesar/gcp-emulator/internal/services/cloudbuild"
+	"github.com/cesar/gcp-emulator/internal/services/clouddeploy"
 	"github.com/cesar/gcp-emulator/internal/services/clouddns"
 	"github.com/cesar/gcp-emulator/internal/services/cloudfunctions"
 	"github.com/cesar/gcp-emulator/internal/services/cloudrun"
@@ -52,6 +54,7 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/monitoring"
 	"github.com/cesar/gcp-emulator/internal/services/networkmanagement"
 	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
+	"github.com/cesar/gcp-emulator/internal/services/privateca"
 	"github.com/cesar/gcp-emulator/internal/services/pubsub"
 	"github.com/cesar/gcp-emulator/internal/services/resourcemanager"
 	"github.com/cesar/gcp-emulator/internal/services/secretmanager"
@@ -134,6 +137,9 @@ func main() {
 	composer.New(db).Register(mux)
 	serviceusage.New(db).Register(mux)
 	metadata.New(db).Register(mux)
+	alloydb.New(db).Register(mux)
+	privateca.New(db).Register(mux)
+	clouddeploy.New(db).Register(mux)
 
 	// Endpoint de salud, útil para chequear que el emulador está arriba.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
