@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
@@ -144,6 +145,34 @@ func main() {
 	// Endpoint de salud, útil para chequear que el emulador está arriba.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		server.WriteJSON(w, 200, map[string]string{"status": "ok"})
+	})
+
+	// Admin snapshots: export and import state for CI/CD and scenario testing.
+	mux.HandleFunc("GET /admin/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("format") == "binary" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Disposition", "attachment; filename=snapshot.db")
+			_ = db.WriteSnapshot(w)
+			return
+		}
+		data, err := db.ExportJSON()
+		if err != nil {
+			server.WriteError(w, 500, "INTERNAL", err.Error())
+			return
+		}
+		server.WriteJSON(w, 200, data)
+	})
+	mux.HandleFunc("POST /admin/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		var data map[string]map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+			return
+		}
+		if err := db.ImportJSON(data); err != nil {
+			server.WriteError(w, 500, "INTERNAL", err.Error())
+			return
+		}
+		server.WriteJSON(w, 200, map[string]string{"status": "imported"})
 	})
 
 	// Frontend estático (consola tipo Google Cloud Console).

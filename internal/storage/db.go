@@ -6,6 +6,7 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -98,6 +99,50 @@ func (d *DB) List(bucket, prefix string, fn func(key string, raw []byte) error) 
 		for k, v := c.Seek(p); k != nil && hasPrefix(k, p); k, v = c.Next() {
 			if err := fn(string(k), v); err != nil {
 				return err
+			}
+		}
+		return nil
+	})
+}
+
+// WriteSnapshot writes a point-in-time binary snapshot of BoltDB to w.
+func (d *DB) WriteSnapshot(w io.Writer) error {
+	return d.bolt.View(func(tx *bolt.Tx) error {
+		_, err := tx.WriteTo(w)
+		return err
+	})
+}
+
+// ExportJSON exports all buckets and keys as a nested map: bucket -> key -> raw JSON.
+func (d *DB) ExportJSON() (map[string]map[string]json.RawMessage, error) {
+	out := make(map[string]map[string]json.RawMessage)
+	err := d.bolt.View(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
+			bName := string(name)
+			out[bName] = make(map[string]json.RawMessage)
+			return b.ForEach(func(k, v []byte) error {
+				raw := make(json.RawMessage, len(v))
+				copy(raw, v)
+				out[bName][string(k)] = raw
+				return nil
+			})
+		})
+	})
+	return out, err
+}
+
+// ImportJSON imports data into buckets.
+func (d *DB) ImportJSON(data map[string]map[string]json.RawMessage) error {
+	return d.bolt.Update(func(tx *bolt.Tx) error {
+		for bName, items := range data {
+			b, err := tx.CreateBucketIfNotExists([]byte(bName))
+			if err != nil {
+				return err
+			}
+			for k, v := range items {
+				if err := b.Put([]byte(k), v); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

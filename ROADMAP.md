@@ -933,3 +933,38 @@ reference; all items are ✅.
 | App Engine | `applications`, `services`, `versions` (CRUD, no real deploy) | Long-tail demand; `google_app_engine_application` still appears in legacy IaC. | L | ✅ Phase 19 |
 | Dataproc | `clusters` (CRUD, shape-only — no real Spark/Hadoop) | Common in data-pipeline Terraform. | L | ✅ Phase 19 |
 | Cloud Composer | `environments` (CRUD, shape-only — no real Airflow) | Closes the orchestration story. | L | ✅ Phase 19 |
+
+## Phase 20 — Engine Hardening & Concurrency Reliability ✅
+
+Comprehensive hardening of server lifecycle, transactional safety, and concurrency primitives across all services.
+
+- **Graceful Shutdown & Backend Eviction**: `cmd/server/main.go` handles `SIGINT`/`SIGTERM` via `signal.NotifyContext`, shutting down the HTTP server cleanly and calling `governor.StopAll()` on active real-execution backends.
+- **Transactional Deadlock Elimination**: Fixed BoltDB view deadlocks in cascading delete operations (`Bigtable` deleting child clusters/profiles and `App Engine` deleting child versions) by buffering keys before delete iterations.
+- **Push Delivery Resilience**: Pub/Sub push delivery now implements up to 3 automatic retries with exponential backoff on HTTP transport errors or non-2xx status codes.
+- **Concurrency & Race Elimination**: Replaced bare `s.seq++` ID increments with thread-safe `atomic.AddInt64(&s.seq, 1)` across all 35+ services and eliminated mutex re-entrancy in Pub/Sub.
+- **Verification**: 100% green tests passing with `go test -count=1 -race ./...` across the entire codebase.
+
+## Phase 21 — Strategic Unlocks (Service Usage, Metadata Server & IAM Credentials) ✅
+
+Unlocks standard Terraform provisioning dependencies and automatic client library authentication.
+
+- **Service Usage API (`serviceusage.googleapis.com/v1`)**: Implemented `POST :batchEnable`, `POST :enable`, `POST :disable`, `GET`, and `GET (list)` under `projects/{project}/services`. Fully unblocks `google_project_service` and `google_project_services`.
+- **GCE Compute Metadata Server (`/computeMetadata/v1/*`)**: Emulates the GCE metadata server (`http://metadata.google.internal` or `GCE_METADATA_HOST`). Enforces required `Metadata-Flavor: Google` header (403 if missing). Returns OAuth2 Bearer tokens (`/instance/service-accounts/{account}/token`), service account emails, project ID, zone, and instance metadata.
+- **IAM Credentials (`iamcredentials.googleapis.com/v1`)**: Added `generateAccessToken` and `signBlob` actions to service accounts, supporting service account impersonation (`google_service_account_access_token`).
+
+## Phase 22 — Enterprise & Modern Services (AlloyDB, Private CA, Cloud Deploy) ✅
+
+Implements modern enterprise services commonly used in production Terraform architectures.
+
+- **AlloyDB for PostgreSQL (`alloydb.googleapis.com/v1`)**: CRUD for clusters and instances under `/alloydb/v1/projects/{project}/locations/{location}/clusters` with cascading instance deletion.
+- **Certificate Authority Service (`privateca.googleapis.com/v1`)**: CRUD for `caPools` and `certificateAuthorities` under `/v1/.../caPools`, supporting activation/deactivation and cascading CA deletion.
+- **Cloud Deploy (`clouddeploy.googleapis.com/v1`)**: CRUD for `deliveryPipelines` and `targets` (GKE and Cloud Run targets) under `/v1/.../deliveryPipelines` and `/v1/.../targets`.
+
+## Phase 23 — Developer Experience, Snapshots & Tooling ✅
+
+Modernization of local testing, state persistence, and operator tooling.
+
+- **Consistent State Snapshots**: `GET /admin/snapshot` (export JSON or point-in-time binary BoltDB hot backup) and `POST /admin/snapshot` (import JSON state) for reproducible CI/CD scenarios.
+- **Modernized Web Console (`web/console/`)**: Redesigned UI with categorized sidebar navigation, supporting Storage, Compute, IAM, Service Usage, Pub/Sub, Secret Manager, AlloyDB, Snapshots, and live system health inspection.
+- **Expanded CLI Configuration (`scripts/configure-gcloud.sh`)**: Configures all 35+ emulated services and documents `GCE_METADATA_HOST` integration.
+

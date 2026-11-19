@@ -12,7 +12,9 @@ package main
 // panic before it ever reaches a real machine.
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -144,3 +146,72 @@ type discardResponseWriter struct {
 func (w *discardResponseWriter) Header() http.Header         { return w.header }
 func (w *discardResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (w *discardResponseWriter) WriteHeader(status int)      { w.status = status }
+
+func TestAdminSnapshotEndpoints(t *testing.T) {
+	db := testutil.NewDB(t)
+	_ = db.Put("test.snap", "key1", map[string]string{"state": "saved"})
+
+	srv := server.New()
+	mux := srv.Mux()
+
+	mux.HandleFunc("GET /admin/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("format") == "binary" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_ = db.WriteSnapshot(w)
+			return
+		}
+		data, err := db.ExportJSON()
+		if err != nil {
+			server.WriteError(w, 500, "INTERNAL", err.Error())
+			return
+		}
+		server.WriteJSON(w, 200, data)
+	})
+	mux.HandleFunc("POST /admin/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		var data map[string]map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+			return
+		}
+		if err := db.ImportJSON(data); err != nil {
+			server.WriteError(w, 500, "INTERNAL", err.Error())
+			return
+		}
+		server.WriteJSON(w, 200, map[string]string{"status": "imported"})
+	})
+
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	// 1. Export JSON
+	var exported map[string]map[string]json.RawMessage
+	status := testutil.DoJSON(t, "GET", ts.URL+"/admin/snapshot", nil, &exported)
+	if status != 200 || len(exported["test.snap"]) != 1 {
+		t.Fatalf("unexpected snapshot export: status=%d, data=%v", status, exported)
+	}
+
+	// 2. Binary export
+	resp, err := http.Get(ts.URL + "/admin/snapshot?format=binary")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("binary export failed: err=%v, status=%v", err, resp)
+	}
+	_ = resp.Body.Close()
+
+	// 3. Import JSON into db
+	newData := map[string]map[string]json.RawMessage{
+		"test.snap": {
+			"key2": json.RawMessage(`{"state":"imported"}`),
+		},
+	}
+	var importResp map[string]string
+	status = testutil.DoJSON(t, "POST", ts.URL+"/admin/snapshot", newData, &importResp)
+	if status != 200 || importResp["status"] != "imported" {
+		t.Fatalf("unexpected snapshot import response: %v", importResp)
+	}
+
+	var res map[string]string
+	found, err := db.Get("test.snap", "key2", &res)
+	if err != nil || !found || res["state"] != "imported" {
+		t.Fatalf("item key2 not found or invalid: %v", res)
+	}
+}

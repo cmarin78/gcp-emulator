@@ -131,11 +131,26 @@ Implemented (functional subset, not exhaustive):
 - **GKE (Kubernetes Engine)**: clusters and nodePools
   (`/v1/projects/{p}/locations/{l}/clusters[/{cluster}[/nodePools[/{nodePool}]]]`,
   CRUD, no `PATCH` on clusters), always `status: RUNNING` with a
-  synthesized endpoint — no real Kubernetes control plane; mutations
-  return a `container#operation` (GKE's own Operation shape, distinct from
-  the simpler `google.longrunning.Operation` used elsewhere).
-- **Web console** (`web/console`): minimal UI to view and manage buckets,
-  instances, and service accounts.
+  synthesized endpoint; mutations return a `container#operation`.
+- **Service Usage**: enabling, disabling, getting, and batch-enabling services
+  (`/v1/projects/{p}/services`, `/services:batchEnable`), unblocking
+  `google_project_service` and `google_project_services` in Terraform.
+- **Compute Metadata Server**: GCE metadata server (`/computeMetadata/v1/*`),
+  enforcing `Metadata-Flavor: Google` and serving OAuth2 access tokens,
+  service account emails, project ID, zone, and instance metadata.
+- **IAM Credentials**: Service account impersonation and token generation
+  (`/v1/projects/{p}/serviceAccounts/{sa}:generateAccessToken` and `:signBlob`).
+- **AlloyDB for PostgreSQL**: clusters and instances (`/alloydb/v1/...`),
+  with cascading instance deletion and VPC network configuration.
+- **Private CA (Certificate Authority Service)**: CA pools and certificate
+  authorities (`/v1/.../caPools`), activation/deactivation, and cascading deletion.
+- **Cloud Deploy**: delivery pipelines and deployment targets (`/v1/.../deliveryPipelines`,
+  `/v1/.../targets`) with GKE and Cloud Run support.
+- **Dataflow, Dataproc, Vertex AI, Composer, App Engine, Bigtable, Memcache, Eventarc, Workflows, Filestore, VPC Access, Service Networking, Certificate Manager, Billing Budgets, Network Management, and Asset Inventory**.
+- **Admin Snapshots & Hot Backups**: `GET /admin/snapshot` (binary BoltDB dump or JSON export)
+  and `POST /admin/snapshot` (JSON import) for reproducible CI/CD state and testing.
+- **Web console** (`web/console`): categorized dashboard to view and manage Storage,
+  Compute, IAM, Service Usage, Pub/Sub, Secret Manager, AlloyDB, Snapshots, and system health.
 - Verified end-to-end with a real `terraform apply`/`destroy` against
   `google_compute_network` + `google_compute_instance` (boot disk +
   network interface), against `google_cloud_run_v2_service`, against
@@ -251,8 +266,9 @@ the volume).
 .\scripts\configure-gcloud.ps1 http://localhost:8443
 ```
 
-This configures `api_endpoint_overrides` for storage/compute/iam pointing
-at the emulator (storage and iam use a slightly different URL shape
+This configures `api_endpoint_overrides` for all 35+ emulated services pointing
+at the emulator, and provides instructions for setting `GCE_METADATA_HOST` so
+Google Cloud SDKs automatically discover local credentials and project IDs.
 because their clients build the path differently: storage and compute
 need the `v1/` in the override, iam appends it itself). gcloud also
 requires an "active" account; if you already have a logged-in session in
