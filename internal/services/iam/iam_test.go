@@ -3,6 +3,7 @@ package iam
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/cesar/gcp-emulator/internal/services/orgpolicy"
@@ -217,5 +218,42 @@ func TestServiceAccountKeyBlockedByOrgPolicy(t *testing.T) {
 	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/proj1/serviceAccounts/key-sa/keys", nil, nil)
 	if status != 200 {
 		t.Fatalf("create key after relaxing constraint: want 200, got %d", status)
+	}
+}
+
+func TestGenerateAccessTokenAndSignBlob(t *testing.T) {
+	srv := newTestServer(t)
+
+	// 1. generateAccessToken
+	var tokenResp struct {
+		AccessToken string `json:"accessToken"`
+		ExpireTime  string `json:"expireTime"`
+	}
+	status := testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/-/serviceAccounts/impersonated@proj1.iam.gserviceaccount.com:generateAccessToken", map[string]any{
+		"scope": []string{"https://www.googleapis.com/auth/cloud-platform"},
+	}, &tokenResp)
+	if status != 200 {
+		t.Fatalf("generateAccessToken: want 200, got %d", status)
+	}
+	if !strings.HasPrefix(tokenResp.AccessToken, "ya29.c.") {
+		t.Fatalf("expected ya29.c. prefix, got %s", tokenResp.AccessToken)
+	}
+	if tokenResp.ExpireTime == "" {
+		t.Fatal("expected non-empty expireTime")
+	}
+
+	// 2. signBlob
+	var signResp struct {
+		KeyID      string `json:"keyId"`
+		SignedBlob string `json:"signedBlob"`
+	}
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/-/serviceAccounts/impersonated@proj1.iam.gserviceaccount.com:signBlob", map[string]any{
+		"payload": "dGVzdC1kYXRh",
+	}, &signResp)
+	if status != 200 {
+		t.Fatalf("signBlob: want 200, got %d", status)
+	}
+	if signResp.SignedBlob == "" {
+		t.Fatal("expected non-empty signedBlob")
 	}
 }

@@ -47,6 +47,7 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/kms"
 	"github.com/cesar/gcp-emulator/internal/services/loadbalancing"
 	"github.com/cesar/gcp-emulator/internal/services/logging"
+	"github.com/cesar/gcp-emulator/internal/services/metadata"
 	"github.com/cesar/gcp-emulator/internal/services/memorystore"
 	"github.com/cesar/gcp-emulator/internal/services/monitoring"
 	"github.com/cesar/gcp-emulator/internal/services/networkmanagement"
@@ -55,6 +56,7 @@ import (
 	"github.com/cesar/gcp-emulator/internal/services/resourcemanager"
 	"github.com/cesar/gcp-emulator/internal/services/secretmanager"
 	"github.com/cesar/gcp-emulator/internal/services/servicenetworking"
+	"github.com/cesar/gcp-emulator/internal/services/serviceusage"
 	"github.com/cesar/gcp-emulator/internal/services/spanner"
 	"github.com/cesar/gcp-emulator/internal/services/vertexai"
 	"github.com/cesar/gcp-emulator/internal/services/vpcaccess"
@@ -130,6 +132,8 @@ func main() {
 	memcache.New(db).Register(mux)
 	appengine.New(db).Register(mux)
 	composer.New(db).Register(mux)
+	serviceusage.New(db).Register(mux)
+	metadata.New(db).Register(mux)
 
 	// Endpoint de salud, útil para chequear que el emulador está arriba.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

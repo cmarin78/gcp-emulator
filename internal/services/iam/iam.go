@@ -554,9 +554,45 @@ func (s *Service) serviceAccountPolicyAction(w http.ResponseWriter, r *http.Requ
 		s.getServiceAccountPolicy(w, email)
 	case "setIamPolicy":
 		s.setServiceAccountPolicy(w, r, email)
+	case "generateAccessToken":
+		s.generateAccessToken(w, r, email)
+	case "signBlob":
+		s.signBlob(w, r, email)
 	default:
 		server.WriteError(w, 404, "NOT_FOUND", "acción no soportada: "+action)
 	}
+}
+
+func (s *Service) generateAccessToken(w http.ResponseWriter, r *http.Request, email string) {
+	var body struct {
+		Delegates []string `json:"delegates"`
+		Scope     []string `json:"scope"`
+		Lifetime  string   `json:"lifetime"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	expireTime := time.Now().UTC().Add(1 * time.Hour).Format(time.RFC3339)
+	token := fmt.Sprintf("ya29.c.%d-%s", time.Now().Unix(), strings.ReplaceAll(email, "@", "-"))
+
+	server.WriteJSON(w, 200, map[string]any{
+		"accessToken": token,
+		"expireTime":  expireTime,
+	})
+}
+
+func (s *Service) signBlob(w http.ResponseWriter, r *http.Request, email string) {
+	var body struct {
+		Payload string `json:"payload"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	signed := base64.StdEncoding.EncodeToString([]byte("emulator-signature-for-" + body.Payload))
+	server.WriteJSON(w, 200, map[string]any{
+		"keyId":      fmt.Sprintf("projects/-/serviceAccounts/%s/keys/default", email),
+		"signedBlob": signed,
+	})
 }
 
 func (s *Service) getServiceAccountPolicy(w http.ResponseWriter, email string) {
