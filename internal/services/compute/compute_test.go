@@ -707,4 +707,16 @@ func TestNetworkFirewallPolicyEnforcementOrderDefault(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", c.name, n.NetworkFirewallPolicyEnforcementOrder, c.want)
 		}
 	}
+
+	var list struct {
+		Items []Network `json:"items"`
+	}
+	if status := testutil.DoJSON(t, "GET", base, nil, &list); status != 200 {
+		t.Fatalf("list status=%d", status)
+	}
+	for _, n := range list.Items {
+		if n.NetworkFirewallPolicyEnforcementOrder == "" {
+			t.Errorf("list: network %q missing networkFirewallPolicyEnforcementOrder", n.Name)
+		}
+	}
 }
