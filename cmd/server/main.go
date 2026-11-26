@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cesar/gcp-emulator/internal/chaos"
 	"github.com/cesar/gcp-emulator/internal/iamenforce"
 	"github.com/cesar/gcp-emulator/internal/realbackend"
 	"github.com/cesar/gcp-emulator/internal/server"
@@ -158,6 +159,11 @@ func main() {
 	alloydb.New(db).Register(mux)
 	privateca.New(db).Register(mux)
 	clouddeploy.New(db).Register(mux)
+
+	// Chaos engineering engine (Phase 26: /admin/chaos)
+	chaosMgr := chaos.New()
+	chaosMgr.RegisterRoutes(mux)
+	srv.SetChaosInterceptor(chaosMgr)
 
 	// Endpoint de salud, útil para chequear que el emulador está arriba.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

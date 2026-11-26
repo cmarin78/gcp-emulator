@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/cesar/gcp-emulator/internal/chaos"
 	"github.com/cesar/gcp-emulator/internal/server"
 	"github.com/cesar/gcp-emulator/internal/services/alloydb"
 	"github.com/cesar/gcp-emulator/internal/services/appengine"
@@ -144,6 +145,10 @@ func TestAllServicesRegisterWithoutPanic(t *testing.T) {
 	privateca.New(db).Register(mux)
 	clouddeploy.New(db).Register(mux)
 
+	chaosMgr := chaos.New()
+	chaosMgr.RegisterRoutes(mux)
+	srv.SetChaosInterceptor(chaosMgr)
+
 	// A trivial sanity request: the mux should at least be wired up enough
 	// to return *some* response (even a 404) instead of nil-dereferencing.
 	req, _ := http.NewRequest("GET", "/healthz", nil)
@@ -229,5 +234,73 @@ func TestAdminSnapshotEndpoints(t *testing.T) {
 	found, err := db.Get("test.snap", "key2", &res)
 	if err != nil || !found || res["state"] != "imported" {
 		t.Fatalf("item key2 not found or invalid: %v", res)
+	}
+}
+
+func TestChaosIntegration(t *testing.T) {
+	db := testutil.NewDB(t)
+	srv := server.New()
+	mux := srv.Mux()
+
+	gcs.New(db).Register(mux)
+	pubsub.New(db).Register(mux)
+
+	chaosMgr := chaos.New()
+	chaosMgr.RegisterRoutes(mux)
+	srv.SetChaosInterceptor(chaosMgr)
+
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		server.WriteJSON(w, 200, map[string]string{"status": "ok"})
+	})
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. Initial request to GCS works
+	status := testutil.DoJSON(t, "POST", ts.URL+"/storage/v1/b", map[string]string{"name": "flaky-bucket"}, nil)
+	if status != 200 {
+		t.Fatalf("initial bucket create failed: %d", status)
+	}
+
+	// 2. Inject 503 rule for flaky-bucket
+	var rule chaos.Rule
+	status = testutil.DoJSON(t, "POST", ts.URL+"/admin/chaos/rules", map[string]any{
+		"pathPrefix": "/storage/v1/b/flaky-bucket",
+		"httpStatus": 503,
+		"delayMs":    5,
+	}, &rule)
+	if status != 201 || rule.ID == "" {
+		t.Fatalf("create chaos rule failed: status=%d rule=%+v", status, rule)
+	}
+
+	// 3. Request to flaky-bucket now fails with 503 UNAVAILABLE
+	var errResp map[string]server.APIError
+	status = testutil.DoJSON(t, "GET", ts.URL+"/storage/v1/b/flaky-bucket", nil, &errResp)
+	if status != 503 || errResp["error"].Status != "UNAVAILABLE" {
+		t.Fatalf("expected 503 UNAVAILABLE from chaos, got status=%d resp=%+v", status, errResp)
+	}
+
+	// 4. Critical infrastructure (/healthz and /admin/*) remains untouched
+	var healthResp map[string]string
+	status = testutil.DoJSON(t, "GET", ts.URL+"/healthz", nil, &healthResp)
+	if status != 200 || healthResp["status"] != "ok" {
+		t.Fatalf("healthz affected by chaos: %d", status)
+	}
+
+	// 5. Unrelated services (Pub/Sub) remain unaffected
+	status = testutil.DoJSON(t, "PUT", ts.URL+"/v1/projects/p1/topics/my-topic", nil, nil)
+	if status != 200 {
+		t.Fatalf("pubsub topic affected by chaos: %d", status)
+	}
+
+	// 6. Delete rule restores normal operation
+	status = testutil.DoJSON(t, "DELETE", ts.URL+"/admin/chaos/rules/"+rule.ID, nil, nil)
+	if status != 200 {
+		t.Fatalf("delete rule failed: %d", status)
+	}
+
+	status = testutil.DoJSON(t, "GET", ts.URL+"/storage/v1/b/flaky-bucket", nil, nil)
+	if status != 200 {
+		t.Fatalf("expected 200 after chaos rule deleted, got %d", status)
 	}
 }

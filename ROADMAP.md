@@ -985,5 +985,14 @@ Brings genuine SQL query evaluation and database data plane emulation to BigQuer
 - **BigQuery Analytical Queries (`jobs.query`)**: Upgraded BigQuery query execution from static table scans to full in-memory SQL evaluation over ingested table rows (`tabledata.insertAll`). Supports custom projection, filtering, and aggregation with standard wire-format cell formatting.
 - **Cloud Spanner Data Plane & Session API**: Implemented full session lifecycle (`/sessions`), transaction tokens (`:beginTransaction`, `:commit`, `:rollback`), and `:executeSql` / `:executeBatchDml` endpoints. Automatically creates in-memory tables from DDL (`createStatement` and `updateDatabaseDdl`) and evaluates queries/mutations in memory.
 
+## Phase 26 — Chaos Engineering & Resilience Injection (`/admin/chaos`) ✅
+
+Enables controlled fault and latency injection to test retry mechanisms, circuit breakers, and disaster recovery in microservices, Terraform pipelines, and client SDKs.
+
+- **Dynamic Rule Engine (`internal/chaos`)**: Non-invasive, thread-safe middleware intercepting requests before reaching service handlers. Supports service-level (`storage`, `pubsub`, `spanner`, etc.), path prefix, and HTTP method matching.
+- **Configurable Faults & Latency**: Supports artificial base latency (`delayMs`), randomized jitter (`jitterMs`), stochastic failure probabilities (`0.0` to `1.0`), and customizable HTTP status codes (`503 UNAVAILABLE`, `429 RESOURCE_EXHAUSTED`, `500 INTERNAL`) with Google-compliant error payloads.
+- **Admin REST API & Observability**: Full CRUD under `/admin/chaos/rules[/{id}]`, bulk clearing (`DELETE /admin/chaos/rules`), and real-time metrics (`GET /admin/chaos/stats`). Critical paths (`/admin/*`, `/healthz`, and `/web/*`) are permanently guarded against fault injection.
+
+
 
 

@@ -541,6 +541,74 @@ resource "google_storage_notification" "notification" {
 }
 ```
 
+## Chaos Engineering & Resilience Testing (`/admin/chaos`)
+
+The emulator includes an integrated chaos engineering engine (Phase 26) to test client retry policies, timeouts, exponential backoff, and circuit breakers by injecting controlled latency and faults dynamically without restarting the server.
+
+### 1. Inject Artificial Latency and Jitter
+
+Add 150ms base latency with up to 50ms random jitter to all Pub/Sub publish operations:
+
+```bash
+curl -X POST localhost:8443/admin/chaos/rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "pubsub",
+    "method": "POST",
+    "delayMs": 150,
+    "jitterMs": 50
+  }'
+```
+
+### 2. Inject Stochastic HTTP Errors (Flaky Service)
+
+Fail 25% of requests to a specific bucket with `503 Service Unavailable`:
+
+```bash
+curl -X POST localhost:8443/admin/chaos/rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pathPrefix": "/storage/v1/b/my-flaky-bucket",
+    "probability": 0.25,
+    "httpStatus": 503,
+    "errorCode": "UNAVAILABLE",
+    "errorMessage": "Transient upstream storage error"
+  }'
+```
+
+### 3. Rate Limiting Simulation (`429 Too Many Requests`)
+
+Simulate quota or rate-limit exhaustion for Cloud Spanner operations:
+
+```bash
+curl -X POST localhost:8443/admin/chaos/rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "spanner",
+    "httpStatus": 429,
+    "errorCode": "RESOURCE_EXHAUSTED",
+    "errorMessage": "Quota exceeded for quota metric 'spanner.googleapis.com/reads'"
+  }'
+```
+
+### 4. Inspect Stats and Clear Rules
+
+```bash
+# View active rules
+curl localhost:8443/admin/chaos/rules
+
+# View injection statistics (evaluated requests, injected delays, injected errors)
+curl localhost:8443/admin/chaos/stats
+
+# Delete a specific rule
+curl -X DELETE localhost:8443/admin/chaos/rules/chaos-rule-1
+
+# Clear all rules (restore normal operation)
+curl -X DELETE localhost:8443/admin/chaos/rules
+```
+
+*(Note: `/admin/*`, `/healthz`, and web console endpoints are permanently exempt from chaos rules to prevent denial-of-service on management planes.)*
+
 ## Testing
 
 Each service package under `internal/services/` has its own `*_test.go`

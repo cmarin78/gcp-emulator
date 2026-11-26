@@ -14,13 +14,24 @@ import (
 	"time"
 )
 
+// ChaosInterceptor intercepts HTTP requests to simulate faults and latency (Phase 26).
+type ChaosInterceptor interface {
+	Intercept(r *http.Request) (delay time.Duration, shouldFail bool, status int, code, msg string)
+}
+
 // Server agrupa el mux principal y permite registrar routers de servicios.
 type Server struct {
-	mux *http.ServeMux
+	mux   *http.ServeMux
+	chaos ChaosInterceptor
 }
 
 func New() *Server {
 	return &Server{mux: http.NewServeMux()}
+}
+
+// SetChaosInterceptor connects a chaos engineering manager to the server pipeline.
+func (s *Server) SetChaosInterceptor(ci ChaosInterceptor) {
+	s.chaos = ci
 }
 
 // Mux expone el ServeMux subyacente para que cada servicio registre sus rutas.
@@ -31,7 +42,24 @@ func (s *Server) Mux() *http.ServeMux {
 // Handler devuelve el http.Handler final, con logging y CORS para que el
 // frontend (consola web) pueda llamar al emulador desde otro puerto/origen.
 func (s *Server) Handler() http.Handler {
-	return withCORS(withLogging(withPathNormalize(s.mux)))
+	return withCORS(withLogging(withChaos(s.chaos, withPathNormalize(s.mux))))
+}
+
+func withChaos(ci ChaosInterceptor, next http.Handler) http.Handler {
+	if ci == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		delay, shouldFail, status, code, msg := ci.Intercept(r)
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		if shouldFail {
+			WriteError(w, status, code, msg)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withPathNormalize corrige una particularidad del provider hashicorp/google:
