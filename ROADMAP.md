@@ -968,3 +968,13 @@ Modernization of local testing, state persistence, and operator tooling.
 - **Modernized Web Console (`web/console/`)**: Redesigned UI with categorized sidebar navigation, supporting Storage, Compute, IAM, Service Usage, Pub/Sub, Secret Manager, AlloyDB, Snapshots, and live system health inspection.
 - **Expanded CLI Configuration (`scripts/configure-gcloud.sh`)**: Configures all 35+ emulated services and documents `GCE_METADATA_HOST` integration.
 
+## Phase 24 — Event-Driven Inter-Service Reactivity ✅
+
+Unlocks realistic event-driven architectures where actions in one service reactively trigger workflows in others.
+
+- **GCS Bucket Notification Configurations (`notificationConfigs`)**: Implemented `POST/GET/DELETE /storage/v1/b/{bucket}/notificationConfigs[/{id}]` supporting topic targeting (`//pubsub.googleapis.com/projects/{project}/topics/{topic}`), event type filtering (`OBJECT_FINALIZE`, `OBJECT_DELETE`), object name prefix filtering (`object_name_prefix`), and payload formats (`JSON_API_V1` and `NONE`).
+- **Decoupled Inter-Service Event Hooking**: GCS object lifecycle hooks (`uploadObject`, `composeObjects`, `deleteObject`) publish events to target Pub/Sub topics via functional callbacks without circular Go package dependencies.
+- **Eventarc CloudEvents Dispatch**: Dispatches standard CloudEvents v1.0 binary mode events (`google.cloud.storage.object.v1.finalized`, `google.cloud.storage.object.v1.deleted`) to matching Eventarc triggers with HTTP or Cloud Run destinations.
+- **End-to-End Verification**: Comprehensive unit tests and end-to-end integration tests proving GCS uploads trigger authentic Pub/Sub push HTTP delivery and Eventarc CloudEvents under `-race`.
+
+

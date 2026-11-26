@@ -27,7 +27,10 @@ Implemented (functional subset, not exhaustive):
   (`:getIamPolicy`/`:setIamPolicy`).
 - **Cloud Storage (GCS)**: create/list/get/delete buckets; upload
   (`uploadType=media`), list, download (`alt=media`), and delete objects;
-  bucket-level IAM bindings (`GET`/`PUT /b/{bucket}/iam`).
+  bucket-level IAM bindings (`GET`/`PUT /b/{bucket}/iam`); object compose and
+  metadata patch; **Notification Configurations (`notificationConfigs`)** for
+  reactive event dispatch to Pub/Sub topics and Eventarc CloudEvents on object
+  upload (`OBJECT_FINALIZE`) and deletion (`OBJECT_DELETE`).
 - **Compute Engine**:
   - Instances: create/list/get/delete, start/stop, with real
     `disks[]` and `networkInterfaces[]` (boot disks are created
@@ -436,6 +439,97 @@ curl localhost:8443/storage/v1/b
 curl -X POST "localhost:8443/upload/storage/v1/b/my-bucket/o?name=hello.txt" \
   -H "Content-Type: text/plain" --data-binary "hello world"
 curl "localhost:8443/storage/v1/b/my-bucket/o/hello.txt?alt=media"
+```
+
+## Event-Driven Architecture (GCS -> Pub/Sub & Eventarc)
+
+The emulator features reactive inter-service eventing (Phase 24). Uploading or deleting objects in Cloud Storage automatically triggers real HTTP deliveries through Pub/Sub push subscriptions and Eventarc triggers.
+
+### 1. GCS to Pub/Sub Push Webhook
+
+1. **Create topic and push subscription pointing to your local webhook or mock service:**
+   ```bash
+   # Create topic
+   curl -X PUT localhost:8443/v1/projects/my-project/topics/storage-events
+
+   # Create push subscription with pushEndpoint
+   curl -X PUT localhost:8443/v1/projects/my-project/subscriptions/storage-sub \
+     -H "Content-Type: application/json" \
+     -d '{
+       "topic": "projects/my-project/topics/storage-events",
+       "pushConfig": {
+         "pushEndpoint": "http://localhost:9999/webhook"
+       }
+     }'
+   ```
+
+2. **Configure GCS bucket notification configuration:**
+   ```bash
+   curl -X POST localhost:8443/storage/v1/b/my-bucket/notificationConfigs \
+     -H "Content-Type: application/json" \
+     -d '{
+       "topic": "//pubsub.googleapis.com/projects/my-project/topics/storage-events",
+       "event_types": ["OBJECT_FINALIZE", "OBJECT_DELETE"],
+       "payload_format": "JSON_API_V1",
+       "object_name_prefix": "uploads/"
+     }'
+   ```
+
+3. **Upload an object:**
+   ```bash
+   curl -X POST "localhost:8443/upload/storage/v1/b/my-bucket/o?name=uploads/doc.pdf" \
+     -H "Content-Type: application/pdf" \
+     --data-binary "dummy pdf content"
+   ```
+   The emulator dispatches an HTTP POST to `http://localhost:9999/webhook` containing the base64-encoded object metadata and attributes (`eventType=OBJECT_FINALIZE`, `bucketId=my-bucket`, `objectId=uploads/doc.pdf`).
+
+### 2. GCS to Eventarc CloudEvents
+
+Create an Eventarc trigger that filters on Cloud Storage events and delivers CloudEvents (v1.0 binary mode with `ce-type`, `ce-id`, and `ce-source` headers) to an HTTP endpoint or Cloud Run service:
+
+```bash
+curl -X POST "localhost:8443/v1/projects/my-project/locations/us-central1/triggers?triggerId=storage-trigger" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "eventFilters": [
+      {"attribute": "type", "value": "google.cloud.storage.object.v1.finalized"},
+      {"attribute": "bucket", "value": "my-bucket"}
+    ],
+    "destination": {
+      "httpEndpoint": {
+        "uri": "http://localhost:8080/events"
+      }
+    }
+  }'
+```
+
+When any file is uploaded to `my-bucket`, `http://localhost:8080/events` immediately receives an HTTP POST with:
+- Header `ce-type: google.cloud.storage.object.v1.finalized`
+- Header `ce-source: //storage.googleapis.com/projects/_/buckets/my-bucket`
+- Header `ce-bucket: my-bucket`
+- Header `ce-object: uploads/doc.pdf`
+- JSON body with the object details.
+
+### 3. Terraform HCL Example
+
+```hcl
+resource "google_storage_bucket" "bucket" {
+  name     = "my-event-bucket"
+  location = "US"
+}
+
+resource "google_pubsub_topic" "topic" {
+  name = "bucket-notifications"
+}
+
+resource "google_storage_notification" "notification" {
+  bucket         = google_storage_bucket.bucket.name
+  payload_format = "JSON_API_V1"
+  topic          = google_pubsub_topic.topic.id
+  event_types    = ["OBJECT_FINALIZE", "OBJECT_DELETE"]
+
+  depends_on = [google_pubsub_topic.topic]
+}
 ```
 
 ## Testing
