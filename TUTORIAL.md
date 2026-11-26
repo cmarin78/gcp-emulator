@@ -278,6 +278,68 @@ Note: `terraform destroy` here calls `cryptoKeyVersions:destroy` under the
 hood — the key ring/crypto key resources are never actually deleted,
 matching real GCP behavior (Cloud KMS has no delete endpoint for either).
 
+### Example E: Event-Driven GCS Notifications to Pub/Sub (Phase 24)
+
+Wire real reactive event notifications from Cloud Storage into a Pub/Sub topic:
+
+```hcl
+provider "google" {
+  project                 = "demo-project"
+  region                  = "us-central1"
+  access_token            = "dummy-token"
+  storage_custom_endpoint = "http://localhost:8443/storage/v1/"
+  pubsub_custom_endpoint  = "http://localhost:8443/v1/"
+}
+
+resource "google_storage_bucket" "bucket" {
+  name     = "reactive-demo-bucket"
+  location = "US"
+}
+
+resource "google_pubsub_topic" "topic" {
+  name = "storage-upload-topic"
+}
+
+resource "google_storage_notification" "notification" {
+  bucket         = google_storage_bucket.bucket.name
+  payload_format = "JSON_API_V1"
+  topic          = google_pubsub_topic.topic.id
+  event_types    = ["OBJECT_FINALIZE", "OBJECT_DELETE"]
+
+  depends_on = [google_pubsub_topic.topic]
+}
+```
+
+### Example F: In-Memory SQL & Spanner Data Plane (Phase 25)
+
+You can run SQL statements directly against BigQuery or Spanner using the emulator's in-memory SQL engine:
+
+```bash
+# Query BigQuery with WHERE, ORDER BY, and aggregations
+curl -X POST localhost:8443/bigquery/v2/projects/demo-project/queries \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "SELECT item, price FROM my_ds.products WHERE price > 50 ORDER BY price DESC",
+    "useLegacySql": false
+  }'
+```
+
+### Example G: Chaos Engineering & Resilience Injection (Phase 26)
+
+Test client retry loops, timeouts, or circuit breakers by dynamically injecting latency and faults without restarting:
+
+```bash
+# Inject a 503 Service Unavailable into 20% of calls to a flaky bucket:
+curl -X POST localhost:8443/admin/chaos/rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pathPrefix": "/storage/v1/b/reactive-demo-bucket",
+    "probability": 0.2,
+    "httpStatus": 503,
+    "delayMs": 50
+  }'
+```
+
 ### Tips for any of the above
 
 - Run each example in its own directory/workspace so state files don't

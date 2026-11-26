@@ -163,6 +163,12 @@ Implemented (functional subset, not exhaustive):
   and `POST /admin/snapshot` (JSON import) for reproducible CI/CD state and testing.
 - **Web console** (`web/console`): categorized dashboard to view and manage Storage,
   Compute, IAM, Service Usage, Pub/Sub, Secret Manager, AlloyDB, Snapshots, and system health.
+- **Event-Driven Reactivity (Phase 24)**: GCS bucket notifications (`notificationConfigs`)
+  with automatic dispatch to Pub/Sub topics and Eventarc CloudEvents triggers.
+- **In-Memory SQL Engine (Phase 25)**: Pure Go AST SQL parser and evaluator for BigQuery
+  (`jobs.query`) and Cloud Spanner Data Plane (`executeSql`, sessions, transactions).
+- **Chaos Engineering & Resilience Engine (Phase 26)**: `/admin/chaos/rules[/{id}]` and
+  `/admin/chaos/stats` for controlled latency, jitter, and stochastic fault injection.
 - Verified end-to-end with a real `terraform apply`/`destroy` against
   `google_compute_network` + `google_compute_instance` (boot disk +
   network interface), against `google_cloud_run_v2_service`, against
@@ -181,37 +187,34 @@ without touching existing ones.
 ## Project structure
 
 ```
-cmd/server/main.go          entry point, wires up the HTTP server
-internal/storage/           embedded persistence (BoltDB)
-internal/server/            router, middlewares, JSON/error helpers, Operations
-internal/services/iam/      IAM emulation
-internal/services/gcs/      Cloud Storage emulation
-internal/services/compute/  Compute Engine emulation (instances, networks,
-                             subnetworks, firewalls, images, disks)
-internal/services/pubsub/         Pub/Sub emulation (topics, subscriptions, publish/pull/ack)
-internal/services/secretmanager/  Secret Manager emulation (secrets, versions)
+cmd/server/main.go               entry point, wires up the HTTP server
+internal/storage/                embedded persistence (BoltDB)
+internal/server/                 router, middlewares, JSON/error helpers, Operations
+internal/chaos/                  chaos engineering, fault & latency injection (/admin/chaos)
+internal/sqlengine/              pure Go in-memory SQL parser and evaluator (AST engine)
+internal/realbackend/            governor & real execution backends (Docker, embedded Postgres)
+internal/services/iam/           IAM emulation (service accounts, keys, policies)
+internal/services/gcs/           Cloud Storage emulation (buckets, objects, notifications, compose)
+internal/services/compute/       Compute Engine emulation (VMs, VPCs, subnets, firewalls, disks)
+internal/services/pubsub/        Pub/Sub emulation (topics, subscriptions, push delivery, pull/ack)
+internal/services/secretmanager/ Secret Manager emulation (secrets, versions, payloads)
 internal/services/artifactregistry/ Artifact Registry emulation (repositories)
-internal/services/cloudrun/         Cloud Run emulation (v2 services)
-internal/services/cloudfunctions/   Cloud Functions emulation (Gen2 functions)
-internal/services/cloudsql/         Cloud SQL Admin emulation (instances, databases, users)
-internal/services/firestore/        Firestore emulation (databases, simple document CRUD)
-internal/services/bigquery/         BigQuery emulation (datasets, tables)
-internal/services/kms/              Cloud KMS emulation (keyrings, cryptokeys, cryptoKeyVersions)
-internal/services/logging/          Cloud Logging emulation (project-level sinks)
-internal/services/monitoring/       Cloud Monitoring emulation (alert policies, timeSeries stub)
-internal/services/resourcemanager/  Resource Manager emulation (projects)
-internal/services/cloudscheduler/   Cloud Scheduler emulation (jobs, :run/:pause/:resume)
-internal/services/cloudtasks/       Cloud Tasks emulation (queues, tasks)
-internal/services/clouddns/         Cloud DNS emulation (managedZones, rrsets via changes)
-internal/services/loadbalancing/    Load Balancing emulation (healthChecks, backendServices,
-                                     urlMaps, target proxies, forwardingRules — global only)
-internal/services/cloudbuild/       Cloud Build emulation (builds, status always SUCCESS)
-internal/services/memorystore/      Memorystore emulation (Redis instances, CRUD)
-internal/services/spanner/          Cloud Spanner emulation (instances, databases)
-internal/services/gke/              GKE emulation (clusters, nodePools — shape-only)
-web/console/                static frontend (HTML/CSS/JS, no build step)
-scripts/                    scripts to point the gcloud CLI at the emulator
-data/                       runtime embedded data file (gitignored)
+internal/services/cloudrun/      Cloud Run emulation (v2 services, containers)
+internal/services/cloudfunctions/ Cloud Functions emulation (Gen2 functions)
+internal/services/cloudsql/      Cloud SQL Admin emulation (instances, databases, users)
+internal/services/firestore/     Firestore emulation (databases, simple document CRUD)
+internal/services/bigquery/      BigQuery emulation (datasets, tables, streaming, in-memory SQL)
+internal/services/spanner/       Cloud Spanner emulation (instances, databases, sessions, SQL)
+internal/services/kms/           Cloud KMS emulation (keyrings, cryptokeys, versions)
+internal/services/serviceusage/  Service Usage emulation (enable, disable, batchEnable)
+internal/services/metadata/      Compute Metadata Server (token generation, instance metadata)
+internal/services/alloydb/       AlloyDB for PostgreSQL emulation (clusters, instances)
+internal/services/privateca/     Certificate Authority Service (caPools, certificateAuthorities)
+internal/services/clouddeploy/   Cloud Deploy emulation (deliveryPipelines, targets)
+internal/services/eventarc/      Eventarc emulation (triggers, CloudEvents dispatch)
+web/console/                     static frontend (HTML/CSS/JS web dashboard)
+scripts/                         scripts to point gcloud at the emulator
+data/                            runtime embedded database file (gitignored)
 ```
 
 ## Requirements
@@ -539,6 +542,61 @@ resource "google_storage_notification" "notification" {
 
   depends_on = [google_pubsub_topic.topic]
 }
+```
+
+## In-Memory SQL Execution (BigQuery & Cloud Spanner)
+
+The emulator features a lightweight, zero-CGO in-memory SQL execution engine (Phase 25) that evaluates real SQL queries across BigQuery and Cloud Spanner.
+
+### 1. BigQuery Analytical Queries
+
+Ingest structured data via streaming ingestion and run queries with filtering, sorting, and aggregations:
+
+```bash
+# Ingest sample metrics
+curl -X POST localhost:8443/bigquery/v2/projects/my-project/datasets/my_ds/tables/metrics/insertAll \
+  -H "Content-Type: application/json" \
+  -d '{
+    "rows": [
+      {"json": {"sensor": "temp-1", "val": 22.5, "zone": "A"}},
+      {"json": {"sensor": "temp-2", "val": 35.0, "zone": "B"}},
+      {"json": {"sensor": "temp-3", "val": 18.2, "zone": "A"}}
+    ]
+  }'
+
+# Run analytical query with WHERE, GROUP BY, and aggregations
+curl -X POST localhost:8443/bigquery/v2/projects/my-project/queries \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "SELECT zone, COUNT(*) as cnt, AVG(val) as avg_temp FROM my_ds.metrics WHERE val > 20 GROUP BY zone ORDER BY avg_temp DESC",
+    "useLegacySql": false
+  }'
+```
+
+### 2. Cloud Spanner Sessions & `executeSql`
+
+Create sessions, execute DDL/DML, and run transactions:
+
+```bash
+# 1. Create a session on a database
+SESSION_NAME=$(curl -s -X POST localhost:8443/v1/projects/my-proj/instances/my-inst/databases/my-db/sessions | jq -r .name)
+
+# 2. Insert rows using DML
+curl -X POST "localhost:8443/v1/${SESSION_NAME}:executeSql" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "INSERT INTO Users (id, name, active) VALUES (\"u1\", \"Alice\", true), (\"u2\", \"Bob\", false)"
+  }'
+
+# 3. Query rows using SELECT
+curl -X POST "localhost:8443/v1/${SESSION_NAME}:executeSql" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT id, name FROM Users WHERE active = true"
+  }'
+
+# 4. Commit transaction
+curl -X POST "localhost:8443/v1/${SESSION_NAME}:commit"
 ```
 
 ## Chaos Engineering & Resilience Testing (`/admin/chaos`)
