@@ -143,3 +143,94 @@ func TestDuplicateCreateConflicts(t *testing.T) {
 		t.Fatalf("duplicate database: want 409, got %d", status)
 	}
 }
+
+func TestSpannerDataPlaneAndExecuteSql(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create Instance and Database with initial DDL
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/p1/instances", map[string]any{"instanceId": "i1"}, nil)
+	testutil.DoJSON(t, "POST", srv.URL+"/v1/projects/p1/instances/i1/databases", map[string]any{
+		"createStatement": "CREATE DATABASE `musicdb`",
+		"extraStatements": []string{
+			"CREATE TABLE Singers (SingerId INT64, FirstName STRING, LastName STRING)",
+		},
+	}, nil)
+
+	dbURL := srv.URL + "/v1/projects/p1/instances/i1/databases/musicdb"
+
+	// 1. Create Session
+	var sess Session
+	status := testutil.DoJSON(t, "POST", dbURL+"/sessions", nil, &sess)
+	if status != 200 || sess.Name == "" {
+		t.Fatalf("create session failed: status=%d sess=%+v", status, sess)
+	}
+
+	// 2. Insert rows via session:executeSql (DML)
+	insertSQL := "INSERT INTO Singers (SingerId, FirstName, LastName) VALUES (1, 'Marc', 'Richards'), (2, 'Catalina', 'Smith')"
+	var dmlResp struct {
+		Stats struct {
+			RowCountExact string `json:"rowCountExact"`
+		} `json:"stats"`
+	}
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/"+sess.Name+":executeSql", map[string]any{
+		"sql": insertSQL,
+	}, &dmlResp)
+	if status != 200 || dmlResp.Stats.RowCountExact != "2" {
+		t.Fatalf("executeSql DML failed: status=%d resp=%+v", status, dmlResp)
+	}
+
+	// 3. Query rows via session:executeSql (SELECT)
+	var selectResp struct {
+		Metadata struct {
+			RowType struct {
+				Fields []struct {
+					Name string `json:"name"`
+				} `json:"fields"`
+			} `json:"rowType"`
+		} `json:"metadata"`
+		Rows [][]any `json:"rows"`
+	}
+	querySQL := "SELECT SingerId, FirstName, LastName FROM Singers WHERE SingerId = 1"
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/"+sess.Name+":executeSql", map[string]any{
+		"sql": querySQL,
+	}, &selectResp)
+	if status != 200 {
+		t.Fatalf("executeSql SELECT failed: status=%d", status)
+	}
+	if len(selectResp.Rows) != 1 || selectResp.Rows[0][1] != "Marc" {
+		t.Fatalf("unexpected select results: %+v", selectResp)
+	}
+
+	// 4. Batch DML
+	var batchResp struct {
+		ResultSets []map[string]any `json:"resultSets"`
+		Status     map[string]any   `json:"status"`
+	}
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/"+sess.Name+":executeBatchDml", map[string]any{
+		"statements": []map[string]string{
+			{"sql": "UPDATE Singers SET LastName = 'Johnson' WHERE SingerId = 1"},
+		},
+	}, &batchResp)
+	if status != 200 || len(batchResp.ResultSets) != 1 {
+		t.Fatalf("batch DML failed: status=%d resp=%+v", status, batchResp)
+	}
+
+	// 5. Transactions (beginTransaction, commit)
+	var txResp map[string]any
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/"+sess.Name+":beginTransaction", nil, &txResp)
+	if status != 200 || txResp["id"] == "" {
+		t.Fatalf("beginTransaction failed: status=%d resp=%+v", status, txResp)
+	}
+
+	var commitResp map[string]any
+	status = testutil.DoJSON(t, "POST", srv.URL+"/v1/"+sess.Name+":commit", nil, &commitResp)
+	if status != 200 || commitResp["commitTimestamp"] == "" {
+		t.Fatalf("commit failed: status=%d resp=%+v", status, commitResp)
+	}
+
+	// 6. Delete Session
+	status = testutil.DoJSON(t, "DELETE", srv.URL+"/v1/"+sess.Name, nil, nil)
+	if status != 200 {
+		t.Fatalf("delete session failed: status=%d", status)
+	}
+}

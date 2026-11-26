@@ -977,4 +977,13 @@ Unlocks realistic event-driven architectures where actions in one service reacti
 - **Eventarc CloudEvents Dispatch**: Dispatches standard CloudEvents v1.0 binary mode events (`google.cloud.storage.object.v1.finalized`, `google.cloud.storage.object.v1.deleted`) to matching Eventarc triggers with HTTP or Cloud Run destinations.
 - **End-to-End Verification**: Comprehensive unit tests and end-to-end integration tests proving GCS uploads trigger authentic Pub/Sub push HTTP delivery and Eventarc CloudEvents under `-race`.
 
+## Phase 25 — Real Data Engine Simulation (In-Memory SQL) ✅
+
+Brings genuine SQL query evaluation and database data plane emulation to BigQuery and Cloud Spanner without external heavy dependencies.
+
+- **Lightweight Pure Go SQL Engine (`internal/sqlengine`)**: Zero-CGO, thread-safe in-memory SQL execution engine. Supports AST parsing, WHERE condition evaluation (`=`, `!=`, `<`, `>`, `LIKE`, `IN`, `IS NULL`, `AND`, `OR`, `NOT`), projections, sorting (`ORDER BY`), pagination (`LIMIT`/`OFFSET`), and aggregations (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP BY`), plus DDL (`CREATE TABLE`, `DROP TABLE`) and DML (`INSERT`, `UPDATE`, `DELETE`).
+- **BigQuery Analytical Queries (`jobs.query`)**: Upgraded BigQuery query execution from static table scans to full in-memory SQL evaluation over ingested table rows (`tabledata.insertAll`). Supports custom projection, filtering, and aggregation with standard wire-format cell formatting.
+- **Cloud Spanner Data Plane & Session API**: Implemented full session lifecycle (`/sessions`), transaction tokens (`:beginTransaction`, `:commit`, `:rollback`), and `:executeSql` / `:executeBatchDml` endpoints. Automatically creates in-memory tables from DDL (`createStatement` and `updateDatabaseDdl`) and evaluates queries/mutations in memory.
+
+
 

@@ -12,16 +12,19 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
+	"github.com/cesar/gcp-emulator/internal/sqlengine"
 	"github.com/cesar/gcp-emulator/internal/storage"
 )
 
 const (
 	bucketInstances = "spanner.instances"
 	bucketDatabases = "spanner.databases"
+	bucketSessions  = "spanner.sessions"
 )
 
 // Instance mirrors the real spanner#Instance resource (project-scoped, not
@@ -60,12 +63,36 @@ type operationMetadata struct {
 	Verb   string `json:"verb"`
 }
 
-type Service struct {
-	db  *storage.DB
-	seq int64
+type Session struct {
+	Name                   string `json:"name"`
+	CreateTime             string `json:"createTime"`
+	ApproximateLastUseTime string `json:"approximateLastUseTime"`
 }
 
-func New(db *storage.DB) *Service { return &Service{db: db} }
+type Service struct {
+	db      *storage.DB
+	seq     int64
+	engines map[string]*sqlengine.Engine
+	engMu   sync.RWMutex
+}
+
+func New(db *storage.DB) *Service {
+	return &Service{
+		db:      db,
+		engines: make(map[string]*sqlengine.Engine),
+	}
+}
+
+func (s *Service) getEngine(dbKey string) *sqlengine.Engine {
+	s.engMu.Lock()
+	defer s.engMu.Unlock()
+	eng, ok := s.engines[dbKey]
+	if !ok {
+		eng = sqlengine.New()
+		s.engines[dbKey] = eng
+	}
+	return eng
+}
 
 func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/projects/{project}/instances", s.createInstance)
@@ -79,6 +106,13 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/projects/{project}/instances/{instance}/databases/{database}", s.getDatabase)
 	mux.HandleFunc("DELETE /v1/projects/{project}/instances/{instance}/databases/{database}", s.deleteDatabase)
 	mux.HandleFunc("PATCH /v1/projects/{project}/instances/{instance}/databases/{database}/ddl", s.updateDatabaseDdl)
+
+	// Spanner Data Plane (Phase 25: In-Memory SQL Engine & Sessions)
+	mux.HandleFunc("POST /v1/projects/{project}/instances/{instance}/databases/{database}/sessions", s.createSession)
+	mux.HandleFunc("GET /v1/projects/{project}/instances/{instance}/databases/{database}/sessions/{session}", s.getSession)
+	mux.HandleFunc("DELETE /v1/projects/{project}/instances/{instance}/databases/{database}/sessions/{session}", s.deleteSession)
+	mux.HandleFunc("POST /v1/projects/{project}/instances/{instance}/databases/{database}/sessions/{sessionAction}", s.sessionAction)
+	mux.HandleFunc("POST /v1/projects/{project}/instances/{instance}/databases/{databaseAction}", s.databaseAction)
 
 	mux.HandleFunc("GET /v1/projects/{project}/instances/{instance}/operations/{operation}", s.getOperation)
 }
@@ -265,6 +299,10 @@ func (s *Service) createDatabase(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+	eng := s.getEngine(databaseKey(project, instance, name))
+	for _, stmt := range body.ExtraStatements {
+		_, _ = eng.Execute(stmt)
+	}
 	s.writeOperation(w, project, instance, "create_database", dbRes.Name, dbRes)
 }
 
@@ -305,21 +343,19 @@ func (s *Service) deleteDatabase(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	instance := r.PathValue("instance")
 	database := r.PathValue("database")
-	if err := s.db.Delete(bucketDatabases, databaseKey(project, instance, database)); err != nil {
+	dbKey := databaseKey(project, instance, database)
+	if err := s.db.Delete(bucketDatabases, dbKey); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+	s.engMu.Lock()
+	delete(s.engines, dbKey)
+	s.engMu.Unlock()
 	server.WriteJSON(w, 200, map[string]any{})
 }
 
 // updateDatabaseDdl handles UpdateDatabaseDdl (databaseadmin.projects.
-// instances.databases.updateDdl), which Terraform's google_spanner_database
-// resource always calls right after CreateDatabase to apply the
-// extraStatements/ddl list (real Spanner only accepts initial DDL through
-// this separate follow-up call, not inline with create). This emulator
-// already stores ExtraStatements on create, so here it's a no-op that just
-// appends the new statements and reports success — no actual schema
-// validation or execution, consistent with the rest of this package.
+// instances.databases.updateDdl).
 func (s *Service) updateDatabaseDdl(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	instance := r.PathValue("instance")
@@ -346,6 +382,12 @@ func (s *Service) updateDatabaseDdl(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+
+	eng := s.getEngine(databaseKey(project, instance, database))
+	for _, stmt := range body.Statements {
+		_, _ = eng.Execute(stmt)
+	}
+
 	s.writeOperation(w, project, instance, "update_database_ddl", d.Name, map[string]any{})
 }
 
@@ -389,4 +431,233 @@ func orDefaultInt(v, def int64) int64 {
 		return def
 	}
 	return v
+}
+
+// ── Spanner Data Plane (Phase 25: Sessions & In-Memory SQL Execution) ──────────
+
+func sessionKey(project, instance, database, session string) string {
+	return fmt.Sprintf("%s/%s/%s/%s", project, instance, database, session)
+}
+
+func sessionName(project, instance, database, session string) string {
+	return fmt.Sprintf("projects/%s/instances/%s/databases/%s/sessions/%s", project, instance, database, session)
+}
+
+func (s *Service) createSession(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	database := r.PathValue("database")
+
+	var d Database
+	found, err := s.db.Get(bucketDatabases, databaseKey(project, instance, database), &d)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "database not found")
+		return
+	}
+
+	sessionID := fmt.Sprintf("session-%d", atomic.AddInt64(&s.seq, 1))
+	now := time.Now().UTC().Format(time.RFC3339)
+	sess := Session{
+		Name:                   sessionName(project, instance, database, sessionID),
+		CreateTime:             now,
+		ApproximateLastUseTime: now,
+	}
+	_ = s.db.Put(bucketSessions, sessionKey(project, instance, database, sessionID), sess)
+	server.WriteJSON(w, 200, sess)
+}
+
+func (s *Service) getSession(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	database := r.PathValue("database")
+	sessionID := r.PathValue("session")
+
+	var sess Session
+	found, err := s.db.Get(bucketSessions, sessionKey(project, instance, database, sessionID), &sess)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "session not found")
+		return
+	}
+	server.WriteJSON(w, 200, sess)
+}
+
+func (s *Service) deleteSession(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	database := r.PathValue("database")
+	sessionID := r.PathValue("session")
+
+	_ = s.db.Delete(bucketSessions, sessionKey(project, instance, database, sessionID))
+	server.WriteJSON(w, 200, map[string]any{})
+}
+
+func (s *Service) databaseAction(w http.ResponseWriter, r *http.Request) {
+	dbName, action, ok := strings.Cut(r.PathValue("databaseAction"), ":")
+	if !ok {
+		server.WriteError(w, 404, "NOT_FOUND", "not found")
+		return
+	}
+	if action == "executeSql" {
+		s.handleExecuteSql(w, r, dbName)
+		return
+	}
+	server.WriteError(w, 404, "NOT_FOUND", "unknown action: "+action)
+}
+
+func (s *Service) sessionAction(w http.ResponseWriter, r *http.Request) {
+	database := r.PathValue("database")
+	_, action, ok := strings.Cut(r.PathValue("sessionAction"), ":")
+	if !ok {
+		server.WriteError(w, 404, "NOT_FOUND", "not found")
+		return
+	}
+	switch action {
+	case "executeSql":
+		s.handleExecuteSql(w, r, database)
+	case "executeBatchDml":
+		s.handleExecuteBatchDml(w, r, database)
+	case "beginTransaction":
+		server.WriteJSON(w, 200, map[string]any{"id": fmt.Sprintf("tx-%d", time.Now().UnixNano())})
+	case "commit":
+		server.WriteJSON(w, 200, map[string]any{"commitTimestamp": time.Now().UTC().Format(time.RFC3339)})
+	case "rollback":
+		server.WriteJSON(w, 200, map[string]any{})
+	default:
+		server.WriteError(w, 404, "NOT_FOUND", "unknown action: "+action)
+	}
+}
+
+func (s *Service) handleExecuteSql(w http.ResponseWriter, r *http.Request, database string) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	dbKey := databaseKey(project, instance, database)
+
+	var d Database
+	found, err := s.db.Get(bucketDatabases, dbKey, &d)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "database not found")
+		return
+	}
+
+	var body struct {
+		SQL string `json:"sql"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.SQL) == "" {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", "sql is required")
+		return
+	}
+
+	eng := s.getEngine(dbKey)
+	trimmed := strings.TrimSpace(body.SQL)
+	isSelect := strings.HasPrefix(strings.ToUpper(trimmed), "SELECT")
+
+	if isSelect {
+		qr, err := eng.Query(body.SQL)
+		if err != nil {
+			server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+			return
+		}
+		var fields []map[string]any
+		for _, col := range qr.Columns {
+			code := "STRING"
+			if col.Type != "" {
+				code = col.Type
+			}
+			fields = append(fields, map[string]any{
+				"name": col.Name,
+				"type": map[string]string{"code": code},
+			})
+		}
+		wireRows := make([][]any, len(qr.Rows))
+		for i, row := range qr.Rows {
+			rowVals := make([]any, len(row))
+			for j, v := range row {
+				if v == nil {
+					rowVals[j] = nil
+				} else {
+					rowVals[j] = fmt.Sprintf("%v", v)
+				}
+			}
+			wireRows[i] = rowVals
+		}
+
+		server.WriteJSON(w, 200, map[string]any{
+			"metadata": map[string]any{
+				"rowType": map[string]any{
+					"fields": fields,
+				},
+			},
+			"rows": wireRows,
+		})
+		return
+	}
+
+	res, err := eng.Execute(body.SQL)
+	if err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+
+	server.WriteJSON(w, 200, map[string]any{
+		"metadata": map[string]any{
+			"rowType": map[string]any{
+				"fields": []any{},
+			},
+		},
+		"stats": map[string]any{
+			"rowCountExact": fmt.Sprintf("%d", res.RowsAffected),
+		},
+	})
+}
+
+func (s *Service) handleExecuteBatchDml(w http.ResponseWriter, r *http.Request, database string) {
+	project := r.PathValue("project")
+	instance := r.PathValue("instance")
+	dbKey := databaseKey(project, instance, database)
+
+	var body struct {
+		Statements []struct {
+			SQL string `json:"sql"`
+		} `json:"statements"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+
+	eng := s.getEngine(dbKey)
+	var resultSets []map[string]any
+	for _, stmt := range body.Statements {
+		res, err := eng.Execute(stmt.SQL)
+		if err != nil {
+			server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
+			return
+		}
+		resultSets = append(resultSets, map[string]any{
+			"stats": map[string]any{
+				"rowCountExact": fmt.Sprintf("%d", res.RowsAffected),
+			},
+		})
+	}
+
+	server.WriteJSON(w, 200, map[string]any{
+		"resultSets": resultSets,
+		"status":     map[string]any{"code": 0},
+	})
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cesar/gcp-emulator/internal/server"
+	"github.com/cesar/gcp-emulator/internal/sqlengine"
 )
 
 const (
@@ -357,9 +358,15 @@ var selectAllRe = regexp.MustCompile(
 )
 
 func (s *Svc) runSimpleQuery(project, query, defaultDataset string) ([]json.RawMessage, TableSchema, error) {
+	// 1. Attempt in-memory execution via sqlengine (Phase 25)
+	if rows, schema, err := s.runEngineQuery(project, query, defaultDataset); err == nil {
+		return rows, schema, nil
+	}
+
+	// 2. Fallback to basic SELECT * scan
 	matches := selectAllRe.FindStringSubmatch(strings.TrimSpace(query))
 	if matches == nil {
-		return nil, TableSchema{}, fmt.Errorf("emulator only supports SELECT * FROM dataset.table [LIMIT N]; got: %s", query)
+		return nil, TableSchema{}, fmt.Errorf("emulator query execution error: %s", query)
 	}
 	dataset := matches[1]
 	tableName := matches[2]
@@ -386,6 +393,88 @@ func (s *Svc) runSimpleQuery(project, query, defaultDataset string) ([]json.RawM
 	}
 
 	return rows, t.Schema, nil
+}
+
+func (s *Svc) runEngineQuery(project, query, defaultDataset string) ([]json.RawMessage, TableSchema, error) {
+	parsed, err := sqlengine.Parse(query)
+	if err != nil {
+		return nil, TableSchema{}, err
+	}
+	stmt, ok := parsed.(*sqlengine.SelectStmt)
+	if !ok {
+		return nil, TableSchema{}, fmt.Errorf("not a SELECT query")
+	}
+
+	// Table name in BQ can be `[project:]dataset.table` or `dataset.table` or `table`
+	tblRaw := stmt.Table
+	tblRaw = strings.Trim(tblRaw, "`\"")
+	if idx := strings.Index(tblRaw, ":"); idx >= 0 {
+		tblRaw = tblRaw[idx+1:]
+	}
+
+	var dataset, tableName string
+	if parts := strings.Split(tblRaw, "."); len(parts) >= 2 {
+		dataset = parts[0]
+		tableName = parts[1]
+	} else {
+		dataset = defaultDataset
+		tableName = tblRaw
+	}
+
+	if dataset == "" || tableName == "" {
+		return nil, TableSchema{}, fmt.Errorf("could not determine dataset and table")
+	}
+
+	var t Table
+	if found, _ := s.db.Get(bucketTables, tableKey(project, dataset, tableName), &t); !found {
+		return nil, TableSchema{}, fmt.Errorf("table %s.%s not found", dataset, tableName)
+	}
+
+	rawRows := s.loadRows(project, dataset, tableName)
+	eng := sqlengine.New()
+
+	var cols []sqlengine.Column
+	for _, f := range t.Schema.Fields {
+		cols = append(cols, sqlengine.Column{Name: f.Name, Type: f.Type})
+	}
+	_ = eng.CreateTable(stmt.Table, cols)
+
+	var parsedRows []map[string]any
+	for _, r := range rawRows {
+		var m map[string]any
+		if err := json.Unmarshal(r, &m); err == nil {
+			parsedRows = append(parsedRows, m)
+		}
+	}
+	_ = eng.InsertRows(stmt.Table, parsedRows)
+
+	qr, err := eng.Query(query)
+	if err != nil {
+		return nil, TableSchema{}, err
+	}
+
+	// Build output schema
+	var outSchema TableSchema
+	for _, c := range qr.Columns {
+		bType := "STRING"
+		if c.Type != "" {
+			bType = c.Type
+		}
+		outSchema.Fields = append(outSchema.Fields, TableFieldSchema{
+			Name: c.Name,
+			Type: bType,
+		})
+	}
+
+	// Build output rows
+	maps := qr.ToMaps()
+	result := make([]json.RawMessage, len(maps))
+	for i, m := range maps {
+		b, _ := json.Marshal(m)
+		result[i] = b
+	}
+
+	return result, outSchema, nil
 }
 
 // ── Wire-format helpers ───────────────────────────────────────────────────────

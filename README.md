@@ -73,7 +73,12 @@ Implemented (functional subset, not exhaustive):
   rather than the full typed Firestore Value wire format — enough for
   create/get/update/delete/list, not for structured queries.
 - **BigQuery**: datasets and tables
-  (`/bigquery/v2/projects/{p}/datasets[/{dataset}[/tables[/{table}]]]`).
+  (`/bigquery/v2/projects/{p}/datasets[/{dataset}[/tables[/{table}]]]`),
+  streaming ingestion (`tabledata.insertAll`), and synchronous query execution
+  (`jobs.query`). Includes an in-memory SQL execution engine (Phase 25)
+  supporting column projection, `WHERE` condition evaluation, `ORDER BY`,
+  pagination (`LIMIT`/`OFFSET`), and aggregations (`COUNT`, `SUM`, `AVG`,
+  `MIN`, `MAX`, `GROUP BY`).
   Unlike the other v2-era services, BigQuery's real API is synchronous, so
   mutations return the resource directly (no `Operation`).
 - **Cloud KMS**: keyrings and cryptokeys
@@ -130,7 +135,11 @@ Implemented (functional subset, not exhaustive):
   (`/v1/projects/{p}/instances[/{instance}[/databases[/{database}]]]`,
   CRUD), database names parsed from the real `CREATE DATABASE <name>` DDL
   statement (same syntax gcloud/Terraform send); always `state: READY`;
-  mutations return a `google.longrunning.Operation`.
+  mutations return a `google.longrunning.Operation`. Includes a full
+  **Data Plane (Phase 25)** supporting sessions (`/sessions`), transactions
+  (`:beginTransaction`, `:commit`, `:rollback`), and `:executeSql` /
+  `:executeBatchDml` with in-memory SQL execution for DDL (`CREATE TABLE`),
+  DML (`INSERT`, `UPDATE`, `DELETE`), and queries (`SELECT`).
 - **GKE (Kubernetes Engine)**: clusters and nodePools
   (`/v1/projects/{p}/locations/{l}/clusters[/{cluster}[/nodePools[/{nodePool}]]]`,
   CRUD, no `PATCH` on clusters), always `status: RUNNING` with a

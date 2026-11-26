@@ -204,3 +204,62 @@ func TestJobsGetQueryResults(t *testing.T) {
 		t.Fatalf("getQueryResults: want totalRows=2, got %q", qr.TotalRows)
 	}
 }
+
+func TestJobsQueryAdvancedSQL(t *testing.T) {
+	srv := newTestServer(t)
+	base := srv.URL + "/bigquery/v2/projects/proj1"
+
+	fields := []map[string]any{
+		{"name": "category", "type": "STRING"},
+		{"name": "item", "type": "STRING"},
+		{"name": "price", "type": "FLOAT"},
+	}
+	createDatasetAndTable(t, srv.URL, "proj1", "analytics", "products", fields)
+	testutil.DoJSON(t, "POST", base+"/datasets/analytics/tables/products/insertAll", map[string]any{
+		"rows": []map[string]any{
+			{"json": map[string]any{"category": "electronics", "item": "laptop", "price": 1200.0}},
+			{"json": map[string]any{"category": "electronics", "item": "phone", "price": 800.0}},
+			{"json": map[string]any{"category": "stationery", "item": "notebook", "price": 5.0}},
+			{"json": map[string]any{"category": "stationery", "item": "pen", "price": 2.0}},
+			{"json": map[string]any{"category": "electronics", "item": "mouse", "price": 40.0}},
+		},
+	}, nil)
+
+	// 1. Query with WHERE, ORDER BY, and projection
+	var qr struct {
+		JobComplete bool             `json:"jobComplete"`
+		TotalRows   string           `json:"totalRows"`
+		Rows        []QueryResultRow `json:"rows"`
+	}
+	status := testutil.DoJSON(t, "POST", base+"/queries", map[string]any{
+		"query": "SELECT item, price FROM analytics.products WHERE price > 50 ORDER BY price DESC",
+	}, &qr)
+	if status != 200 || !qr.JobComplete {
+		t.Fatalf("advanced query failed: status=%d qr=%+v", status, qr)
+	}
+	if qr.TotalRows != "2" || len(qr.Rows) != 2 {
+		t.Fatalf("expected 2 expensive items, got %s (rows=%d)", qr.TotalRows, len(qr.Rows))
+	}
+	if qr.Rows[0].F[0].V != "laptop" || qr.Rows[1].F[0].V != "phone" {
+		t.Fatalf("expected laptop then phone, got %+v", qr.Rows)
+	}
+
+	// 2. Query with Aggregates and GROUP BY
+	var aggQr struct {
+		JobComplete bool             `json:"jobComplete"`
+		TotalRows   string           `json:"totalRows"`
+		Rows        []QueryResultRow `json:"rows"`
+	}
+	status = testutil.DoJSON(t, "POST", base+"/queries", map[string]any{
+		"query": "SELECT category, COUNT(*) as cnt, SUM(price) as total FROM analytics.products GROUP BY category ORDER BY total DESC",
+	}, &aggQr)
+	if status != 200 || !aggQr.JobComplete {
+		t.Fatalf("agg query failed: status=%d qr=%+v", status, aggQr)
+	}
+	if aggQr.TotalRows != "2" || len(aggQr.Rows) != 2 {
+		t.Fatalf("expected 2 categories, got %s", aggQr.TotalRows)
+	}
+	if aggQr.Rows[0].F[0].V != "electronics" {
+		t.Fatalf("expected electronics first by total price, got %+v", aggQr.Rows)
+	}
+}
