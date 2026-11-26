@@ -678,3 +678,45 @@ func TestAutoscalerClampsRealTargetSize(t *testing.T) {
 		t.Fatalf("expected targetSize shrunk to 3 after lowering max via PATCH, got %d", afterPatch.TargetSize)
 	}
 }
+
+// Regression: the Terraform google provider reports a perpetual diff on
+// google_compute_network when networkFirewallPolicyEnforcementOrder is not
+// returned by the API (real GCP defaults it to AFTER_CLASSIC_FIREWALL).
+func TestNetworkFirewallPolicyEnforcementOrderDefault(t *testing.T) {
+	srv := newTestServer(t)
+	base := srv.URL + "/compute/v1/projects/proj1/global/networks"
+
+	cases := []struct {
+		name string
+		body map[string]any
+		want string
+	}{
+		{"default", map[string]any{"name": "net-default"}, "AFTER_CLASSIC_FIREWALL"},
+		{"explicit", map[string]any{"name": "net-explicit", "networkFirewallPolicyEnforcementOrder": "BEFORE_CLASSIC_FIREWALL"}, "BEFORE_CLASSIC_FIREWALL"},
+	}
+	for _, c := range cases {
+		var op Operation
+		if status := testutil.DoJSON(t, "POST", base, c.body, &op); status != 200 {
+			t.Fatalf("%s: insert status=%d", c.name, status)
+		}
+		var n Network
+		if status := testutil.DoJSON(t, "GET", base+"/"+c.body["name"].(string), nil, &n); status != 200 {
+			t.Fatalf("%s: get status=%d", c.name, status)
+		}
+		if n.NetworkFirewallPolicyEnforcementOrder != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, n.NetworkFirewallPolicyEnforcementOrder, c.want)
+		}
+	}
+
+	var list struct {
+		Items []Network `json:"items"`
+	}
+	if status := testutil.DoJSON(t, "GET", base, nil, &list); status != 200 {
+		t.Fatalf("list status=%d", status)
+	}
+	for _, n := range list.Items {
+		if n.NetworkFirewallPolicyEnforcementOrder == "" {
+			t.Errorf("list: network %q missing networkFirewallPolicyEnforcementOrder", n.Name)
+		}
+	}
+}

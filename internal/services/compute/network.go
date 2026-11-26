@@ -29,7 +29,14 @@ type Network struct {
 	CreationTimestamp     string           `json:"creationTimestamp"`
 	SelfLink              string           `json:"selfLink"`
 	Peerings              []NetworkPeering `json:"peerings,omitempty"`
+
+	// NetworkFirewallPolicyEnforcementOrder defaults to
+	// AFTER_CLASSIC_FIREWALL on real GCP. The Terraform provider treats a
+	// missing value as drift, so it must be echoed back on every read.
+	NetworkFirewallPolicyEnforcementOrder string `json:"networkFirewallPolicyEnforcementOrder,omitempty"`
 }
+
+const defaultFirewallPolicyEnforcementOrder = "AFTER_CLASSIC_FIREWALL"
 
 // NetworkPeering mirrors compute#NetworkPeering, the nested resource
 // created/removed via the network's addPeering/removePeering custom
@@ -158,6 +165,8 @@ func (s *Service) insertNetwork(w http.ResponseWriter, r *http.Request) {
 		Name                  string `json:"name"`
 		Description           string `json:"description"`
 		AutoCreateSubnetworks *bool  `json:"autoCreateSubnetworks"`
+
+		NetworkFirewallPolicyEnforcementOrder string `json:"networkFirewallPolicyEnforcementOrder"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		server.WriteError(w, 400, "INVALID_ARGUMENT", err.Error())
@@ -188,6 +197,8 @@ func (s *Service) insertNetwork(w http.ResponseWriter, r *http.Request) {
 		AutoCreateSubnetworks: auto,
 		CreationTimestamp:     time.Now().UTC().Format(time.RFC3339),
 		SelfLink:              fmt.Sprintf("/compute/v1/projects/%s/global/networks/%s", project, body.Name),
+
+		NetworkFirewallPolicyEnforcementOrder: orDefault(body.NetworkFirewallPolicyEnforcementOrder, defaultFirewallPolicyEnforcementOrder),
 	}
 	if err := s.db.Put(bucketNetworks, networkKey(n.Name), n); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
