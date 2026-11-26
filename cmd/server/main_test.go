@@ -81,9 +81,11 @@ func TestAllServicesRegisterWithoutPanic(t *testing.T) {
 	}()
 
 	iam.New(db).Register(mux)
-	gcs.New(db).Register(mux)
+	gcsSvc := gcs.New(db)
+	gcsSvc.Register(mux)
 	compute.New(db).Register(mux)
-	pubsub.New(db).Register(mux)
+	pubsubSvc := pubsub.New(db)
+	pubsubSvc.Register(mux)
 	secretmanager.New(db).Register(mux)
 	artifactregistry.New(db).Register(mux)
 	cloudrun.New(db, nil).Register(mux)
@@ -107,7 +109,21 @@ func TestAllServicesRegisterWithoutPanic(t *testing.T) {
 	vpcaccess.New(db).Register(mux)
 	filestore.New(db).Register(mux)
 	workflows.New(db).Register(mux)
-	eventarc.New(db).Register(mux)
+	eventarcSvc := eventarc.New(db)
+	eventarcSvc.Register(mux)
+
+	gcsSvc.SetPubSubPublisher(pubsubSvc.Publish)
+	gcsSvc.SetCloudEventPublisher(func(e gcs.CloudEvent) error {
+		_, err := eventarcSvc.DispatchCloudEvent(eventarc.CloudEvent{
+			ID:              e.ID,
+			Source:          e.Source,
+			Type:            e.Type,
+			DataContentType: e.DataContentType,
+			Attributes:      e.Attributes,
+			Data:            e.Data,
+		})
+		return err
+	})
 	servicenetworking.New(db).Register(mux)
 	iap.New(db).Register(mux)
 	orgpolicy.New(db).Register(mux)

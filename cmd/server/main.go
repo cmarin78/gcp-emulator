@@ -95,9 +95,11 @@ func main() {
 	log.Printf("real-backend foundation: budget=%dMB docker-available=%v (%s)", realBudgetMB, dockerAvail.Available, dockerAvail.Detail)
 
 	iam.New(db).Register(mux)
-	gcs.New(db).Register(mux)
+	gcsSvc := gcs.New(db)
+	gcsSvc.Register(mux)
 	compute.New(db).Register(mux)
-	pubsub.New(db).Register(mux)
+	pubsubSvc := pubsub.New(db)
+	pubsubSvc.Register(mux)
 	secretmanager.New(db).Register(mux)
 	artifactregistry.New(db).Register(mux)
 	cloudrun.New(db, realGovernor).Register(mux)
@@ -121,7 +123,22 @@ func main() {
 	vpcaccess.New(db).Register(mux)
 	filestore.New(db).Register(mux)
 	workflows.New(db).Register(mux)
-	eventarc.New(db).Register(mux)
+	eventarcSvc := eventarc.New(db)
+	eventarcSvc.Register(mux)
+
+	// Wire inter-service reactivity (Phase 24: Event-Driven Architecture)
+	gcsSvc.SetPubSubPublisher(pubsubSvc.Publish)
+	gcsSvc.SetCloudEventPublisher(func(e gcs.CloudEvent) error {
+		_, err := eventarcSvc.DispatchCloudEvent(eventarc.CloudEvent{
+			ID:              e.ID,
+			Source:          e.Source,
+			Type:            e.Type,
+			DataContentType: e.DataContentType,
+			Attributes:      e.Attributes,
+			Data:            e.Data,
+		})
+		return err
+	})
 	servicenetworking.New(db).Register(mux)
 	iap.New(db).Register(mux)
 	orgpolicy.New(db).Register(mux)

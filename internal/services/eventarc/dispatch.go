@@ -236,3 +236,29 @@ func (s *Service) logDelivery(project string, t Trigger, status, severity string
 	})
 	activity.IncrCounter(project, "eventarc.googleapis.com/trigger/event_count", map[string]string{"trigger_name": t.Name})
 }
+
+// DispatchCloudEvent evaluates a CloudEvent against all registered triggers.
+// For every trigger whose eventFilters match the event, it delivers the event
+// asynchronously to the trigger's destination in CloudEvents binary mode.
+// Returns the count of matched triggers.
+func (s *Service) DispatchCloudEvent(e CloudEvent) (int, error) {
+	if e.ID == "" {
+		e.ID = fmt.Sprintf("evt-%d", time.Now().UnixNano())
+	}
+
+	var matched int
+	err := s.db.List(bucketTriggers, "", func(key string, raw []byte) error {
+		var t Trigger
+		if err := json.Unmarshal(raw, &t); err != nil {
+			return nil
+		}
+		if matchesFilters(e, t.EventFilters) {
+			matched++
+			parts := strings.Split(key, "/")
+			project := parts[0]
+			go s.deliver(project, t, e)
+		}
+		return nil
+	})
+	return matched, err
+}

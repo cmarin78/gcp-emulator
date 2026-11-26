@@ -14,6 +14,7 @@ package pubsub
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -242,29 +243,66 @@ func (s *Service) publish(w http.ResponseWriter, r *http.Request, project, topic
 	now := time.Now().UTC().Format(time.RFC3339)
 	ids := make([]string, 0, len(body.Messages))
 	for _, m := range body.Messages {
-		seq := atomic.AddInt64(&s.seq, 1)
-		msg := Message{
-			Data:        m.Data,
-			Attributes:  m.Attributes,
-			MessageID:   fmt.Sprintf("%d", seq),
-			PublishTime: now,
-		}
-		ids = append(ids, msg.MessageID)
-		for _, sub := range subs {
-			if sub.PushConfig != nil && sub.PushConfig.PushEndpoint != "" {
-				// Subscription de push: entrega real por HTTP, sin pasar
-				// por la cola de pull (igual que la API real).
-				go s.deliverPush(sub, msg)
-				continue
-			}
-			ackSeq := atomic.AddInt64(&s.seq, 1)
-			s.pending[sub.Name] = append(s.pending[sub.Name], ReceivedMessage{
-				AckID:   fmt.Sprintf("ack-%d", ackSeq),
-				Message: msg,
-			})
-		}
+		id := s.dispatchMessage(project, tName, subs, m.Data, m.Attributes, now)
+		ids = append(ids, id)
 	}
 	server.WriteJSON(w, 200, map[string]any{"messageIds": ids})
+}
+
+// Publish provides a programmatic entry point for internal services (e.g. GCS notifications)
+// to publish an event into a Pub/Sub topic without an HTTP loopback.
+func (s *Service) Publish(project, topic string, data []byte, attributes map[string]string) error {
+	tName := topicName(project, topic)
+	var t Topic
+	found, err := s.db.Get(bucketTopics, tName, &t)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("topic not found: %s", tName)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var subs []Subscription
+	_ = s.db.List(bucketSubscriptions, fmt.Sprintf("projects/%s/subscriptions/", project), func(key string, raw []byte) error {
+		var sub Subscription
+		if err := json.Unmarshal(raw, &sub); err != nil {
+			return err
+		}
+		if sub.Topic == tName {
+			subs = append(subs, sub)
+		}
+		return nil
+	})
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	dataB64 := base64.StdEncoding.EncodeToString(data)
+	s.dispatchMessage(project, tName, subs, dataB64, attributes, now)
+	return nil
+}
+
+func (s *Service) dispatchMessage(project, tName string, subs []Subscription, dataB64 string, attributes map[string]string, now string) string {
+	seq := atomic.AddInt64(&s.seq, 1)
+	msg := Message{
+		Data:        dataB64,
+		Attributes:  attributes,
+		MessageID:   fmt.Sprintf("%d", seq),
+		PublishTime: now,
+	}
+	for _, sub := range subs {
+		if sub.PushConfig != nil && sub.PushConfig.PushEndpoint != "" {
+			go s.deliverPush(sub, msg)
+			continue
+		}
+		ackSeq := atomic.AddInt64(&s.seq, 1)
+		s.pending[sub.Name] = append(s.pending[sub.Name], ReceivedMessage{
+			AckID:   fmt.Sprintf("ack-%d", ackSeq),
+			Message: msg,
+		})
+	}
+	return msg.MessageID
 }
 
 // deliverPush hace un HTTP POST real al pushEndpoint de la subscription,

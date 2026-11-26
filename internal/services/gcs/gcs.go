@@ -64,7 +64,10 @@ type Object struct {
 }
 
 type Service struct {
-	db *storage.DB
+	db                *storage.DB
+	notificationSeq   int64
+	pubsubPublisher   PubSubPublisher
+	eventarcPublisher CloudEventPublisher
 }
 
 func New(db *storage.DB) *Service {
@@ -93,6 +96,9 @@ func (s *Service) Register(mux *http.ServeMux) {
 	// Fase 17: PATCH objeto (actualizar metadatos), compose.
 	mux.HandleFunc("PATCH /storage/v1/b/{bucket}/o/{object...}", s.patchObject)
 	mux.HandleFunc("POST /storage/v1/b/{bucket}/o/{destinationObject...}", s.composeObjects)
+
+	// Fase 24: NotificationConfigs para eventos reactivos a Pub/Sub
+	s.registerNotificationRoutes(mux)
 }
 
 func (s *Service) createBucket(w http.ResponseWriter, r *http.Request) {
@@ -206,6 +212,7 @@ func (s *Service) uploadObject(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+	s.notifyObjectEvent(bucket, obj, "OBJECT_FINALIZE")
 	server.WriteJSON(w, 200, obj)
 }
 
@@ -271,10 +278,20 @@ func (s *Service) getObjectOrDownload(w http.ResponseWriter, r *http.Request) {
 func (s *Service) deleteObject(w http.ResponseWriter, r *http.Request) {
 	bucket := r.PathValue("bucket")
 	name := r.PathValue("object")
+	rec, found, err := s.loadObject(bucket, name)
+	if err != nil {
+		server.WriteError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if !found {
+		server.WriteError(w, 404, "NOT_FOUND", "objeto no encontrado")
+		return
+	}
 	if err := s.db.Delete(bucketObjects, objectKey(bucket, name)); err != nil {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+	s.notifyObjectEvent(bucket, rec.Object, "OBJECT_DELETE")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -428,5 +445,6 @@ func (s *Service) composeObjects(w http.ResponseWriter, r *http.Request) {
 		server.WriteError(w, 500, "INTERNAL", err.Error())
 		return
 	}
+	s.notifyObjectEvent(bucket, obj, "OBJECT_FINALIZE")
 	server.WriteJSON(w, 200, obj)
 }
